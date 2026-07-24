@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ML Playground — see how machine learning algorithms actually work</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧠</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◍</span>
+      <div>
+        <h1>ML Playground</h1>
+        <p>Click to add points. Pick an algorithm. Watch it learn, step by step.</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="status-pill" class="pill pill-idle">Ready</span>
+      <button id="help-toggle" class="btn btn-ghost" type="button">How to use</button>
+    </div>
+  </header>
+
+  <dialog id="help-dialog">
+    <h2>How to use this</h2>
+    <ol>
+      <li><strong>Choose an algorithm</strong> on the left. The plot switches between regression, classification and clustering mode to match it.</li>
+      <li><strong>Get some data.</strong> Either pick a generated dataset, or click straight on the plot to place your own points. In classification mode the coloured buttons above the plot choose which class you are placing.</li>
+      <li><strong>Tune the hyperparameters</strong> and press <em>Train</em>. With auto-train on, every change re-fits immediately.</li>
+      <li><strong>Scrub through the animation.</strong> Each frame is one real step of the algorithm — an epoch, an iteration, a level of depth — not a decorative transition.</li>
+    </ol>
+    <h3>Plot controls</h3>
+    <ul>
+      <li><strong>Click</strong> — add a point</li>
+      <li><strong>Drag a point</strong> — move it and watch the model follow</li>
+      <li><strong>Shift-click</strong> or <strong>right-click</strong> a point — delete it</li>
+    </ul>
+    <form method="dialog"><button class="btn btn-primary" type="submit">Got it</button></form>
+  </dialog>
+
+  <main class="layout">
+    <!-- ------------------------------------------------------------------ -->
+    <aside class="panel sidebar">
+      <section class="block">
+        <h2 class="block-title">Algorithm</h2>
+        <div id="algorithm-list" class="algo-list"></div>
+      </section>
+
+      <section class="block">
+        <h2 class="block-title">Data</h2>
+        <label class="field">
+          <span class="field-label">Dataset</span>
+          <select id="generator-select"></select>
+        </label>
+        <p id="generator-help" class="field-help"></p>
+        <div id="generator-params"></div>
+        <div class="button-row">
+          <button id="generate-btn" class="btn btn-primary" type="button">Generate</button>
+          <button id="reseed-btn" class="btn" type="button" title="New random seed">Shuffle</button>
+        </div>
+      </section>
+
+      <section class="block">
+        <h2 class="block-title">Hyperparameters</h2>
+        <div id="param-controls"></div>
+        <div class="button-row">
+          <button id="train-btn" class="btn btn-primary btn-wide" type="button">Train</button>
+        </div>
+        <label class="checkbox">
+          <input type="checkbox" id="auto-train" checked />
+          <span>Auto-train on every change</span>
+        </label>
+      </section>
+    </aside>
+
+    <!-- ------------------------------------------------------------------ -->
+    <section class="panel stage">
+      <div class="stage-toolbar">
+        <div id="class-picker" class="class-picker"></div>
+        <div class="toolbar-right">
+          <label class="inline-field">
+            <span>Detail</span>
+            <select id="resolution-select">
+              <option value="40">Fast</option>
+              <option value="56" selected>Normal</option>
+              <option value="80">Sharp</option>
+            </select>
+          </label>
+          <button id="clear-btn" class="btn btn-ghost" type="button">Clear points</button>
+        </div>
+      </div>
+
+      <div class="plot-wrap">
+        <canvas id="plot"></canvas>
+        <div id="plot-empty" class="plot-overlay">Click anywhere to add your first point, or generate a dataset.</div>
+        <div id="plot-error" class="plot-overlay plot-overlay-error" hidden></div>
+      </div>
+
+      <div class="playback">
+        <button id="play-btn" class="btn btn-icon" type="button" title="Play / pause">▶</button>
+        <button id="prev-btn" class="btn btn-icon" type="button" title="Previous step">◀|</button>
+        <button id="next-btn" class="btn btn-icon" type="button" title="Next step">|▶</button>
+        <input id="step-slider" type="range" min="0" max="0" value="0" />
+        <span id="step-counter" class="step-counter">—</span>
+        <label class="inline-field">
+          <span>Speed</span>
+          <select id="speed-select">
+            <option value="1200">0.5×</option>
+            <option value="600" selected>1×</option>
+            <option value="300">2×</option>
+            <option value="120">4×</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="step-readout">
+        <span id="step-label" class="step-label">No model trained yet</span>
+        <p id="step-description">Pick an algorithm, add some data, and press Train.</p>
+      </div>
+
+      <div id="overlay-toggles" class="overlay-toggles"></div>
+    </section>
+
+    <!-- ------------------------------------------------------------------ -->
+    <aside class="panel insights">
+      <section class="block">
+        <h2 class="block-title">Metrics</h2>
+        <canvas id="metric-chart"></canvas>
+        <div id="metric-legend" class="metric-legend"></div>
+      </section>
+
+      <section class="block">
+        <h2 class="block-title">Final result</h2>
+        <dl id="summary" class="summary"></dl>
+        <ul id="notes" class="notes"></ul>
+      </section>
+
+      <section class="block" id="diagram-block" hidden>
+        <h2 class="block-title" id="diagram-title">Model structure</h2>
+        <div id="diagram" class="diagram"></div>
+      </section>
+
+      <section class="block">
+        <h2 class="block-title" id="explain-title">How it works</h2>
+        <div id="explain" class="explain"></div>
+        <h3 class="block-subtitle">Things to try</h3>
+        <ul id="watch-for" class="watch-for"></ul>
+      </section>
+    </aside>
+  </main>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
