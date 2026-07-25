@@ -5,3 +5,8 @@ __pycache__/
 venv/
 node_modules/
 .DS_Store
+
+# Editor settings are personal: the project needs only Python and a shell.
+.vscode/
+.idea/
+*.swp

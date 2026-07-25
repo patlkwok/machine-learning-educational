@@ -50,30 +50,50 @@ adjustable sample count, noise and seed.
 
 ## Running it
 
-Requires Python 3.10+.
+The only requirements are Python 3.10 or newer and a shell — Bash on macOS and Linux, PowerShell
+on Windows. No editor, IDE or Node toolchain is needed: the frontend is plain ES modules served
+straight from disk, with no build step. Working in a virtual environment is recommended, and both
+run scripts pick `.venv` up automatically if it exists.
+
+**macOS / Linux**
 
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ./run.sh
 ```
-
-Then open <http://127.0.0.1:8000>. Options:
 
 ```bash
 ./run.sh --dev          # auto-reload while editing
 PORT=9000 ./run.sh      # pick a port
 ```
 
-Or drive uvicorn yourself:
+**Windows (PowerShell)**
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+.\run.ps1
+```
+
+```powershell
+.\run.ps1 -Dev            # auto-reload while editing
+.\run.ps1 -Port 9000      # pick a port
+```
+
+Then open <http://127.0.0.1:8000>.
+
+Or drive uvicorn yourself, on any platform:
 
 ```bash
-python3 -m uvicorn backend.app.main:app --port 8000
+python -m uvicorn backend.app.main:app --port 8000
 ```
 
 ### Tests
 
 ```bash
-python3 -m pytest
+python -m pytest
 ```
 
 72 tests cover every algorithm endpoint, every dataset generator, the grid encoding, parameter
