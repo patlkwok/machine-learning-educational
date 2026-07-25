@@ -44,6 +44,9 @@ class Param:
     step: float | None = None
     options: list[dict] | None = None
     help: str = ""
+    # "linear" or "log". A log slider spends equal travel on each decade, which
+    # is the only usable way to offer a range like 1e-5 to 10. Requires min > 0.
+    scale: str = "linear"
 
     def as_dict(self) -> dict:
         return {
@@ -56,6 +59,7 @@ class Param:
             "step": self.step,
             "options": self.options,
             "help": self.help,
+            "scale": self.scale,
         }
 
     def coerce(self, raw: Any) -> Any:

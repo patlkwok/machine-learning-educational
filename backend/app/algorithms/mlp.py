@@ -1,8 +1,9 @@
 """A small multi-layer perceptron, trained one epoch per frame.
 
-Deliberately tiny: a couple of hidden layers over two input features trains in
-well under a second on a laptop CPU, which is the only reason a neural network
-earns a place in this playground.
+One or two hidden layers of up to 100 neurons each, over two input features.
+Even the largest option trains and renders every animation frame in about a
+second on a laptop CPU, which is the only reason a neural network earns a place
+in this playground.
 """
 
 from __future__ import annotations
@@ -17,14 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from ..grid import Grid, class_surface, confidence_from_scores
 from .base import AlgorithmSpec, FitResult, Param, Step, prepare_labelled, thin
 
-ARCHITECTURES = {
-    "4": (4,),
-    "8": (8,),
-    "16": (16,),
-    "8,8": (8, 8),
-    "16,16": (16, 16),
-    "32,16": (32, 16),
-}
+MAX_NEURONS = 100
 
 MAX_DIAGRAM_WEIGHTS = 900
 
@@ -39,14 +33,15 @@ SPEC = AlgorithmSpec(
         "stacking them lets the network compose simple pieces into an arbitrarily shaped boundary.",
         "Training is <strong>backpropagation</strong>: run the data forward, measure the loss, then "
         "push the error gradients backwards to nudge every weight. Each frame here is one epoch.",
-        "This network is deliberately small — a few dozen neurons over two input features — so it "
-        "trains in a fraction of a second on any laptop. The lesson is the same as for a large one: "
-        "the boundary starts near-linear and progressively acquires curvature as the hidden units "
-        "specialise.",
+        "You choose the shape: one or two hidden layers of up to 100 neurons each. Even the widest "
+        "option is tiny by modern standards and trains in about a second, but the lesson is the same "
+        "as for a large network: the boundary starts near-linear and progressively acquires curvature "
+        "as the hidden units specialise. Set the second layer to 0 for a single-layer network.",
     ],
     watch_for=[
         "Early epochs look almost like logistic regression. The curvature appears later, as hidden units differentiate.",
-        "On spirals, a single small hidden layer stalls; add a second layer and it suddenly untangles.",
+        "On spirals, a single narrow hidden layer stalls; widen it or set layer 2 above 0 and it suddenly untangles.",
+        "Compare 2 neurons against 100 in layer 1: too few and the network physically cannot bend the boundary enough.",
         "Switch activation from ReLU to tanh: ReLU gives piecewise-linear, faceted boundaries, tanh gives smooth ones.",
         "Too high a learning rate makes the loss curve bounce instead of descend.",
         "The diagram shades each connection by weight — red for negative, blue for positive — so you can see weights grow apart from zero.",
@@ -55,19 +50,24 @@ SPEC = AlgorithmSpec(
     step_hint="Each frame is one epoch of backpropagation over the whole dataset.",
     params=[
         Param(
-            name="hidden",
-            label="Hidden layers",
-            type="select",
-            default="16,16",
-            options=[
-                {"value": "4", "label": "1 layer x 4 neurons"},
-                {"value": "8", "label": "1 layer x 8 neurons"},
-                {"value": "16", "label": "1 layer x 16 neurons"},
-                {"value": "8,8", "label": "2 layers x 8 neurons"},
-                {"value": "16,16", "label": "2 layers x 16 neurons"},
-                {"value": "32,16", "label": "2 layers: 32 then 16"},
-            ],
-            help="More and wider layers can express more complex boundaries.",
+            name="layer1",
+            label="Hidden layer 1 neurons",
+            type="int",
+            default=16,
+            min=1,
+            max=MAX_NEURONS,
+            step=1,
+            help="Width of the first hidden layer. Wider layers can carve more pieces out of the plane.",
+        ),
+        Param(
+            name="layer2",
+            label="Hidden layer 2 neurons",
+            type="int",
+            default=16,
+            min=0,
+            max=MAX_NEURONS,
+            step=1,
+            help="Width of the second hidden layer. Set to 0 for a single-hidden-layer network.",
         ),
         Param(
             name="activation",
@@ -87,7 +87,7 @@ SPEC = AlgorithmSpec(
             type="int",
             default=60,
             min=1,
-            max=400,
+            max=100,
             step=1,
             help="Passes over the training data.",
         ),
@@ -96,9 +96,9 @@ SPEC = AlgorithmSpec(
             label="Learning rate",
             type="float",
             default=0.02,
-            min=0.0005,
-            max=0.5,
-            step=0.0005,
+            min=1e-5,
+            max=10.0,
+            scale="log",
             help="Adam's step size. Too high and the loss bounces around.",
         ),
         Param(
@@ -130,7 +130,10 @@ def _network_diagram(model: MLPClassifier) -> dict | None:
 
 def fit(points, params, grid: Grid) -> FitResult:
     data = prepare_labelled(points)
-    hidden = ARCHITECTURES.get(params["hidden"], (16, 16))
+    # layer2 = 0 means "one hidden layer"; scikit-learn rejects a zero-width layer.
+    layer1 = int(np.clip(params["layer1"], 1, MAX_NEURONS))
+    layer2 = int(np.clip(params["layer2"], 0, MAX_NEURONS))
+    hidden = (layer1, layer2) if layer2 > 0 else (layer1,)
     activation = params["activation"]
     epochs = int(params["epochs"])
     lr = float(params["learning_rate"])

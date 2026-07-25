@@ -193,6 +193,7 @@ code {
   margin-bottom: 5px;
 }
 .field-value { font-family: var(--mono); font-size: 11.5px; color: var(--accent-strong); }
+
 .field-help { font-size: 11.5px; color: var(--text-faint); margin: -6px 0 12px; }
 
 select, input[type="number"], input[type="text"] {
@@ -204,6 +205,32 @@ select, input[type="number"], input[type="text"] {
   padding: 7px 9px;
   font: inherit;
   font-size: 13px;
+}
+
+/* The value readout doubles as a text box, so a slider is never the only way to
+   reach a precise value.
+   Must come after the generic input rule above: both selectors have the same
+   specificity, so order alone decides which width and padding win.
+   No horizontal padding or border, because either would inset the digits from
+   the right-hand edge and break alignment with the end of the slider track. */
+input.field-value-input {
+  width: 64px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--accent-strong);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-align: right;
+}
+input.field-value-input:hover { color: var(--text); }
+input.field-value-input:focus {
+  color: var(--text);
+  /* Outline, not border: it is drawn outside the box and cannot shift the text. */
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
 }
 select:focus, input:focus { outline: 2px solid rgba(91, 156, 248, 0.5); outline-offset: -1px; }
 

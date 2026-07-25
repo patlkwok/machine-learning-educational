@@ -69,9 +69,62 @@ def test_catalogue_shape(catalogue):
         assert spec["description"] and spec["watch_for"]
         for param in spec["params"]:
             assert param["type"] in {"int", "float", "select", "bool"}
+            assert param["scale"] in {"linear", "log"}
             if param["type"] == "select":
                 assert param["options"]
                 assert param["default"] in [o["value"] for o in param["options"]]
+            if param["type"] in {"int", "float"}:
+                # The frontend needs both bounds to build a slider and to clamp
+                # whatever the user types into the box beside it.
+                assert param["min"] is not None and param["max"] is not None
+                assert param["min"] <= param["default"] <= param["max"]
+
+
+def test_epochs_are_capped_at_100():
+    for spec in client.get("/api/algorithms").json()["algorithms"]:
+        for param in spec["params"]:
+            if param["name"] == "epochs":
+                assert param["max"] == 100, f"{spec['id']} allows {param['max']} epochs"
+
+
+def test_learning_rates_are_log_scaled():
+    found = 0
+    for spec in client.get("/api/algorithms").json()["algorithms"]:
+        for param in spec["params"]:
+            if param["name"] != "learning_rate":
+                continue
+            found += 1
+            assert param["scale"] == "log"
+            # A log slider divides by zero on a zero lower bound.
+            assert param["min"] > 0
+            assert param["min"] == pytest.approx(1e-5)
+            assert param["max"] == pytest.approx(10.0)
+    assert found == 3, f"expected 3 learning-rate params, found {found}"
+
+
+@pytest.mark.parametrize(
+    "algorithm,epochs,expected",
+    [
+        ("linear_regression", 500, 100),  # clamped down to the cap
+        ("linear_regression", 0, 1),
+        ("logistic_regression", 500, 100),
+        ("mlp", 500, 100),
+    ],
+)
+def test_epoch_values_are_clamped(algorithm, epochs, expected):
+    task = ALGORITHM_TASKS[algorithm]
+    payload = fit(algorithm, points_for(task), {"epochs": epochs})
+    assert payload["params"]["epochs"] == expected
+
+
+def test_extreme_learning_rate_is_accepted_not_crashed():
+    """The top of the log range diverges; that is a lesson, not an error."""
+    payload = fit("linear_regression", points_for("regression"), {"learning_rate": 10.0})
+    assert payload["params"]["learning_rate"] == pytest.approx(10.0)
+    assert any("diverged" in note for note in payload["notes"])
+
+    tiny = fit("linear_regression", points_for("regression"), {"learning_rate": 1e-5})
+    assert tiny["params"]["learning_rate"] == pytest.approx(1e-5)
 
 
 def test_index_is_served():
@@ -227,11 +280,37 @@ def test_svm_reports_support_vectors():
 
 
 def test_mlp_emits_a_network_diagram():
-    payload = fit("mlp", points_for("classification"), {"hidden": "8,8", "epochs": 5})
+    payload = fit("mlp", points_for("classification"), {"layer1": 8, "layer2": 8, "epochs": 5})
     network = payload["steps"][-1]["extras"]["network"]
     # Two features in; two hidden layers; a single logistic output for 2 classes.
     assert network["layers"] == [2, 8, 8, 1]
     assert len(network["weights"]) == 3
+
+
+def test_mlp_layer2_zero_gives_one_hidden_layer():
+    payload = fit("mlp", points_for("classification"), {"layer1": 12, "layer2": 0, "epochs": 5})
+    assert payload["steps"][-1]["extras"]["network"]["layers"] == [2, 12, 1]
+    assert payload["summary"]["Architecture"] == "2 → 12 → 1"
+
+
+def test_mlp_neurons_are_capped_at_100():
+    catalogue = client.get("/api/algorithms").json()
+    mlp = next(s for s in catalogue["algorithms"] if s["id"] == "mlp")
+    widths = {p["name"]: p for p in mlp["params"] if p["name"] in {"layer1", "layer2"}}
+    assert widths["layer1"]["min"] == 1 and widths["layer1"]["max"] == 100
+    assert widths["layer2"]["min"] == 0 and widths["layer2"]["max"] == 100
+
+    payload = fit("mlp", points_for("classification"), {"layer1": 5000, "layer2": 5000, "epochs": 2})
+    assert payload["params"]["layer1"] == 100 and payload["params"]["layer2"] == 100
+    assert payload["summary"]["Architecture"] == "2 → 100 → 100 → 1"
+
+
+def test_widest_mlp_stays_responsive():
+    """2-100-100-1 is the heaviest configuration the UI can request."""
+    payload = fit("mlp", points_for("classification"), {"layer1": 100, "layer2": 100, "epochs": 100})
+    assert payload["elapsed_ms"] < 8000, f"took {payload['elapsed_ms']} ms"
+    # Too many weights to draw legibly, so the diagram is omitted by design.
+    assert payload["steps"][-1]["extras"]["network"] is None
 
 
 def test_naive_bayes_ellipses_are_axis_aligned():
