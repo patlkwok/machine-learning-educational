@@ -107,7 +107,7 @@ python -m uvicorn backend.app.main:app --port 8000
 python -m pytest
 ```
 
-170 tests cover every algorithm endpoint, every dataset generator, the grid encoding, parameter
+194 tests cover every algorithm endpoint, every dataset generator, the grid encoding, parameter
 coercion and clamping, and the error paths (unlabelled data, a single class, too few points,
 degenerate input).
 
