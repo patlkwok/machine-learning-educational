@@ -8,11 +8,14 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 from ..grid import Grid
 from .base import (
+    METRIC_LABELS,
     AlgorithmSpec,
     FitResult,
     Param,
     Step,
+    make_split,
     prepare_regression,
+    split_notes,
     thin,
 )
 
@@ -94,28 +97,33 @@ def _line_curve(grid: Grid, slope: float, intercept: float) -> list[list[float]]
     return [[float(a), float(b)] for a, b in zip(xs, ys)]
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     X, y = prepare_regression(points)
     lr = float(params["learning_rate"])
     epochs = int(params["epochs"])
     penalty = params["regularization"]
     alpha = float(params["alpha"])
 
+    split = make_split(len(y), validation)
+    X_train, y_train = X[split.train], y[split.train]
+    X_val, y_val = X[split.val], y[split.val]
+
     # Gradient descent is scale sensitive, so standardise and map the learned
-    # coefficients back into plot coordinates for display.
-    x_mean, x_std = float(X.mean()), float(X.std()) or 1.0
-    y_mean, y_std = float(y.mean()), float(y.std()) or 1.0
-    Xs = (X - x_mean) / x_std
-    ys = (y - y_mean) / y_std
+    # coefficients back into plot coordinates for display. The statistics come
+    # from the training points alone, so held-out points stay genuinely unseen.
+    x_mean, x_std = float(X_train.mean()), float(X_train.std()) or 1.0
+    y_mean, y_std = float(y_train.mean()), float(y_train.std()) or 1.0
+    Xs = (X_train - x_mean) / x_std
+    ys = (y_train - y_mean) / y_std
 
     def to_plot(w: float, b: float) -> tuple[float, float]:
         slope = y_std * w / x_std
         intercept = y_mean + y_std * b - slope * x_mean
         return slope, intercept
 
-    ols = LinearRegression().fit(X, y)
+    ols = LinearRegression().fit(X_train, y_train)
     ols_slope, ols_intercept = float(ols.coef_[0]), float(ols.intercept_)
-    ols_mse = float(mean_squared_error(y, ols.predict(X)))
+    ols_mse = float(mean_squared_error(y_train, ols.predict(X_train)))
 
     model = SGDRegressor(
         loss="squared_error",
@@ -127,13 +135,22 @@ def fit(points, params, grid: Grid) -> FitResult:
         random_state=0,
     )
 
-    def snapshot(slope: float, intercept: float) -> tuple[float, float]:
-        pred = slope * X[:, 0] + intercept
-        return float(mean_squared_error(y, pred)), float(r2_score(y, pred))
+    def snapshot(slope: float, intercept: float):
+        """(train mse, train r2, val mse, val r2) for one candidate line."""
 
-    frames: list[tuple[int, float, float, float, float]] = []
-    mse, r2 = snapshot(0.0, 0.0)
-    frames.append((0, 0.0, 0.0, mse, r2))
+        def on(features, target):
+            if len(target) == 0:
+                return None, None
+            predicted = slope * features[:, 0] + intercept
+            return (
+                float(mean_squared_error(target, predicted)),
+                float(r2_score(target, predicted)),
+            )
+
+        return on(X_train, y_train) + on(X_val, y_val)
+
+    frames = [(0, 0.0, 0.0) + snapshot(0.0, 0.0)]
+    mse = frames[0][3]
 
     diverged = False
     for epoch in range(1, epochs + 1):
@@ -142,14 +159,14 @@ def fit(points, params, grid: Grid) -> FitResult:
         if not (np.isfinite(slope) and np.isfinite(intercept)) or abs(slope) > 1e6:
             diverged = True
             break
-        mse, r2 = snapshot(slope, intercept)
-        frames.append((epoch, slope, intercept, mse, r2))
+        mse, r2, val_mse, val_r2 = snapshot(slope, intercept)
+        frames.append((epoch, slope, intercept, mse, r2, val_mse, val_r2))
         if not np.isfinite(mse) or mse > 1e12:
             diverged = True
             break
 
     steps: list[Step] = []
-    for epoch, slope, intercept, mse, r2 in thin(frames):
+    for epoch, slope, intercept, mse, r2, val_mse, val_r2 in thin(frames):
         if epoch == 0:
             label = "Start"
             description = (
@@ -160,14 +177,22 @@ def fit(points, params, grid: Grid) -> FitResult:
         else:
             description = (
                 f"After epoch {epoch} the line is <code>ŷ = {slope:.3f}·x + {intercept:.3f}</code>, "
-                f"with mean squared error {mse:.3f} (R² = {r2:.3f})."
+                f"with training MSE {mse:.3f} (R² = {r2:.3f})"
+                + (f", validation MSE {val_mse:.3f}." if val_mse is not None else ".")
             )
             label = f"Epoch {epoch}"
         steps.append(
             Step(
                 label=label,
                 description=description,
-                metrics={"mse": mse, "r2": r2, "slope": slope, "intercept": intercept},
+                metrics={
+                    "train_mse": mse,
+                    "val_mse": val_mse,
+                    "train_r2": r2,
+                    "val_r2": val_r2,
+                    "slope": slope,
+                    "intercept": intercept,
+                },
                 curve=_line_curve(grid, slope, intercept),
                 extras={
                     "slope": slope,
@@ -188,24 +213,27 @@ def fit(points, params, grid: Grid) -> FitResult:
             "overshoots the minimum and the error grows. Lower it and run again."
         )
 
+    notes.extend(split_notes(split, steps[-1].metrics))
+
     final = steps[-1]
     return FitResult(
         task="regression",
         steps=steps,
         metric_labels={
-            "mse": "Mean squared error",
-            "r2": "R²",
+            **METRIC_LABELS,
             "slope": "Slope (w)",
             "intercept": "Intercept (b)",
         },
-        chart_metrics=["mse", "r2"],
+        chart_metrics=["train_mse", "val_mse", "train_r2", "val_r2"],
         summary={
             "Equation": final.extras["equation"],
-            "MSE": final.metrics["mse"],
-            "R²": final.metrics["r2"],
+            "Training MSE": final.metrics["train_mse"],
+            "Validation MSE": final.metrics["val_mse"],
+            "R²": final.metrics["train_r2"],
             "Optimal MSE": ols_mse,
         },
         notes=notes,
+        split=split,
         extras={
             "reference_curve": _line_curve(grid, ols_slope, ols_intercept),
             "reference_label": "Least-squares optimum",

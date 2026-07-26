@@ -346,6 +346,16 @@ input[type="range"] {
 }
 .btn-primary:hover { background: linear-gradient(180deg, #5b9cf8, #4a8ff0); }
 .btn-ghost { background: transparent; }
+/* Secondary action sitting under a control rather than in a button row. */
+.btn-subtle {
+  width: 100%;
+  margin-top: 2px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.btn-subtle:hover:not(:disabled) { color: var(--text); }
 .btn-wide { flex: 1; }
 .btn-icon { min-width: 38px; padding: 6px 9px; font-size: 13px; }
 .button-row { display: flex; gap: 8px; margin-top: 12px; }

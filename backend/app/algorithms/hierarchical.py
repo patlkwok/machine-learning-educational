@@ -137,7 +137,9 @@ def _centroids(X: np.ndarray, labels: np.ndarray) -> dict[int, list[float]]:
     }
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
+    # validation is unused: clustering has no labels to score a holdout against.
+    del validation
     X = prepare_unlabelled(points, min_points=3)
     method = params["linkage"]
     target = int(params["n_clusters"])

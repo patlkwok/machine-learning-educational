@@ -104,7 +104,9 @@ def _surface(X: np.ndarray, labels: np.ndarray, core: np.ndarray, eps: float, gr
     return class_surface(cells, n_classes=max(n_clusters, 1))
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
+    # validation is unused: clustering has no labels to score a holdout against.
+    del validation
     X = prepare_unlabelled(points, min_points=3)
     eps = float(params["eps"])
     min_samples = int(params["min_samples"])

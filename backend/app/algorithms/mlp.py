@@ -16,7 +16,17 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
 from ..grid import Grid, class_surface, confidence_from_scores
-from .base import AlgorithmSpec, FitResult, Param, Step, prepare_labelled, thin
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_labelled,
+    split_notes,
+    thin,
+)
 
 MAX_NEURONS = 100
 
@@ -128,7 +138,7 @@ def _network_diagram(model: MLPClassifier) -> dict | None:
     }
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     data = prepare_labelled(points)
     # layer2 = 0 means "one hidden layer"; scikit-learn rejects a zero-width layer.
     layer1 = int(np.clip(params["layer1"], 1, MAX_NEURONS))
@@ -139,8 +149,13 @@ def fit(points, params, grid: Grid) -> FitResult:
     lr = float(params["learning_rate"])
     alpha = float(params["alpha"])
 
-    scaler = StandardScaler().fit(data.X)
-    Xs = scaler.transform(data.X)
+    split = make_split(len(data.y), validation, data.y)
+    X_train, y_train = data.X[split.train], data.y[split.train]
+    X_val, y_val = data.X[split.val], data.y[split.val]
+
+    scaler = StandardScaler().fit(X_train)
+    Xs = scaler.transform(X_train)
+    Xs_val = scaler.transform(X_val) if split.active else None
     grid_s = scaler.transform(grid.points)
 
     model = MLPClassifier(
@@ -152,19 +167,20 @@ def fit(points, params, grid: Grid) -> FitResult:
         max_iter=1,
         warm_start=True,
         random_state=0,
-        batch_size=min(32, max(2, len(data.y))),
+        batch_size=min(32, max(2, len(y_train))),
     )
 
     snapshots = []
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ConvergenceWarning)
         for epoch in range(1, epochs + 1):
-            model.fit(Xs, data.y)
+            model.fit(Xs, y_train)
             snapshots.append(
                 (
                     epoch,
                     float(model.loss_),
-                    float((model.predict(Xs) == data.y).mean()),
+                    float((model.predict(Xs) == y_train).mean()),
+                    float((model.predict(Xs_val) == y_val).mean()) if split.active else None,
                     [w.copy() for w in model.coefs_],
                     [b.copy() for b in model.intercepts_],
                 )
@@ -176,7 +192,7 @@ def fit(points, params, grid: Grid) -> FitResult:
         architecture = f"2 → {' → '.join(str(h) for h in hidden)} → {n_outputs}"
 
         steps: list[Step] = []
-        for epoch, loss, acc, coefs, intercepts in thin(snapshots):
+        for epoch, loss, acc, val_acc, coefs, intercepts in thin(snapshots):
             model.coefs_, model.intercepts_ = coefs, intercepts
             proba = model.predict_proba(grid_s)
             labels = np.argmax(proba, axis=1)
@@ -184,10 +200,16 @@ def fit(points, params, grid: Grid) -> FitResult:
                 Step(
                     label=f"Epoch {epoch}",
                     description=(
-                        f"Epoch {epoch}: loss {loss:.4f}, training accuracy {acc * 100:.1f}%. "
-                        f"Architecture {architecture}."
+                        f"Epoch {epoch}: loss {loss:.4f}, training accuracy {acc * 100:.1f}%"
+                        + (f", validation {val_acc * 100:.1f}%. " if val_acc is not None else ". ")
+                        + f"Architecture {architecture}."
                     ),
-                    metrics={"loss": loss, "accuracy": acc, "epoch": epoch},
+                    metrics={
+                        "train_loss": loss,
+                        "train_accuracy": acc,
+                        "val_accuracy": val_acc,
+                        "epoch": epoch,
+                    },
                     surface=class_surface(
                         labels,
                         n_classes=data.n_classes,
@@ -206,22 +228,25 @@ def fit(points, params, grid: Grid) -> FitResult:
         "Inputs are standardised before training; neural networks converge much faster on scaled features.",
     ]
     final = steps[-1]
-    if len(steps) >= 3 and final.metrics["loss"] > steps[-3].metrics["loss"]:
+    if len(steps) >= 3 and final.metrics["train_loss"] > steps[-3].metrics["train_loss"]:
         notes.append("The loss went up over the last few epochs — try a lower learning rate.")
-    elif final.metrics["accuracy"] < 0.85:
+    elif final.metrics["train_accuracy"] < 0.85:
         notes.append("Still underfitting: give it more epochs, a bigger hidden layer, or a higher learning rate.")
+    notes.extend(split_notes(split, final.metrics))
 
     return FitResult(
         task="classification",
         steps=steps,
-        metric_labels={"loss": "Training loss", "accuracy": "Training accuracy", "epoch": "Epoch"},
-        chart_metrics=["loss", "accuracy"],
+        metric_labels={**METRIC_LABELS, "epoch": "Epoch"},
+        chart_metrics=["train_loss", "train_accuracy", "val_accuracy"],
         summary={
             "Architecture": architecture,
             "Parameters": n_params,
-            "Final loss": final.metrics["loss"],
-            "Accuracy": final.metrics["accuracy"],
+            "Final loss": final.metrics["train_loss"],
+            "Training accuracy": final.metrics["train_accuracy"],
+            "Validation accuracy": final.metrics["val_accuracy"],
         },
         notes=notes,
+        split=split,
         extras={"class_values": data.class_values, "hidden": list(hidden)},
     )

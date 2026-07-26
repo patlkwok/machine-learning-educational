@@ -74,7 +74,14 @@ def fit(request: FitRequest) -> dict:
 
     started = time.perf_counter()
     try:
-        payload = registry.run(request.algorithm, request.params, points, grid)
+        payload = registry.run(
+            request.algorithm,
+            request.params,
+            points,
+            grid,
+            request.validation_split,
+            request.validation_seed,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown algorithm '{request.algorithm}'")
     except DataError as exc:

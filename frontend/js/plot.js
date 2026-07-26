@@ -43,6 +43,7 @@ export class Plot {
     this.hoverIndex = -1;
     this.dragIndex = -1;
     this.surfaceCache = new Map();
+    this.heldOut = new Set();
 
     this._bindEvents();
     this._resize();
@@ -72,6 +73,9 @@ export class Plot {
     this.result = result;
     this.stepIndex = result ? result.steps.length - 1 : 0;
     this.surfaceCache.clear();
+    // Points the model never saw, ringed so the split is visible rather than
+    // just a number in the metrics panel.
+    this.heldOut = new Set(result?.split?.validation_indices || []);
     this.render();
   }
 
@@ -526,6 +530,18 @@ export class Plot {
         ctx.strokeStyle = theme.fade(theme.colors().plotInk, 0.85);
         ctx.lineWidth = 1.6;
         ctx.stroke();
+      }
+
+      // Held-out points get a dashed ring: same colour, visibly not trained on.
+      if (this.heldOut.has(index)) {
+        ctx.save();
+        ctx.setLineDash([3, 2.5]);
+        ctx.beginPath();
+        ctx.arc(sx, sy, POINT_RADIUS + 3, 0, Math.PI * 2);
+        ctx.strokeStyle = theme.fade(theme.colors().plotInk, 0.75);
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.restore();
       }
 
       // DBSCAN distinguishes three kinds of point, and the whole algorithm is

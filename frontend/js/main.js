@@ -10,8 +10,9 @@ import * as theme from './theme.js';
 
 const VIEWPORT = { x_min: -5, x_max: 5, y_min: -5, y_max: 5 };
 
-// Upper bound of the dataset seed control. Shuffle must not exceed it.
-const SEED_MAX = 999;
+// Seeds are internal: the buttons randomise them and the API validates them,
+// but no number is ever shown. Must match the API's limit in schemas.py.
+const SEED_MAX = 999999;
 
 const DEFAULT_GENERATOR = {
   regression: 'linear_regression',
@@ -24,6 +25,7 @@ const dom = {
   generatorSelect: document.getElementById('generator-select'),
   generatorHelp: document.getElementById('generator-help'),
   generatorParams: document.getElementById('generator-params'),
+  validationControl: document.getElementById('validation-control'),
   generateBtn: document.getElementById('generate-btn'),
   reseedBtn: document.getElementById('reseed-btn'),
   paramControls: document.getElementById('param-controls'),
@@ -66,6 +68,11 @@ const state = {
   readParams: () => ({}),
   generator: null,
   generatorOptions: { n_samples: 200, noise: 0.2, seed: 1, classes: 3 },
+  // Fraction of points held out of training, shared by every supervised algorithm.
+  validationSplit: 0.2,
+  // Which partition to draw; changed only by the Resample split button, so the
+  // split stays fixed while you tune anything else.
+  validationSeed: 0,
   activeClass: 0,
   classCount: 2,
   result: null,
@@ -105,8 +112,6 @@ async function boot() {
 function bindGlobalControls() {
   dom.generateBtn.addEventListener('click', () => generateData({ mode: 'play' }));
   dom.reseedBtn.addEventListener('click', () => {
-    // Must stay inside the seed control's own range, or it is clamped on the
-    // way into the slider and every "shuffle" lands on the maximum.
     state.generatorOptions.seed = Math.floor(Math.random() * (SEED_MAX + 1));
     renderGeneratorControls();
     generateData({ mode: 'play' });
@@ -230,6 +235,22 @@ async function selectAlgorithm(algorithmId, { generate } = {}) {
     },
   });
 
+  // Some algorithms expose a randomisable value as a button rather than a
+  // number, because the number means nothing but changing it means a lot.
+  if (spec.reseed) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-subtle';
+    button.id = 'reseed-param';
+    button.textContent = spec.reseed.label;
+    button.title = spec.reseed.help || '';
+    button.addEventListener('click', () => {
+      state.params[spec.reseed.param] = Math.floor(Math.random() * (SEED_MAX + 1));
+      train({ mode: 'play' });
+    });
+    dom.paramControls.appendChild(button);
+  }
+
   plot.setTask(spec.task);
   renderClassPicker();
   renderExplanation(spec);
@@ -297,7 +318,7 @@ function renderGeneratorControls() {
       type: 'int',
       default: state.generatorOptions.n_samples,
       min: 10,
-      max: 600,
+      max: 1000,
       step: 10,
       help: '',
     },
@@ -311,16 +332,9 @@ function renderGeneratorControls() {
       step: 0.01,
       help: '',
     },
-    {
-      name: 'seed',
-      label: 'Seed',
-      type: 'int',
-      default: state.generatorOptions.seed,
-      min: 0,
-      max: 999,
-      step: 1,
-      help: '',
-    },
+    // No seed control. Everything here is seeded and reproducible either way,
+    // so showing the number buys nothing a learner can use: "Shuffle" and
+    // "Resample split" say what they do, where "seed 731469" does not.
   ];
 
   if (spec && spec.supports_classes) {
@@ -336,6 +350,8 @@ function renderGeneratorControls() {
     });
   }
 
+  renderValidationControl();
+
   state.readGeneratorOptions = buildParamControls(dom.generatorParams, params, {
     values: state.generatorOptions,
     onChange: (name, value) => {
@@ -344,6 +360,62 @@ function renderGeneratorControls() {
       else markStale('data');
     },
   });
+}
+
+/**
+ * The validation-split control, shown only where it means something.
+ *
+ * Clustering has no labels, so there is nothing a held-out point could be
+ * scored against; offering the control there would imply otherwise.
+ */
+function renderValidationControl() {
+  const supervised = currentSpec().task !== 'clustering';
+  dom.validationControl.innerHTML = '';
+  if (!supervised) return;
+
+  const resample = document.createElement('button');
+  resample.type = 'button';
+  resample.className = 'btn btn-subtle';
+  resample.id = 'resample-split';
+  resample.textContent = 'Resample split';
+  resample.title =
+    'Draw a different set of held-out points from the same data. ' +
+    'If the metrics move a lot, the split was doing the work, not the model.';
+  resample.addEventListener('click', () => {
+    state.validationSeed = Math.floor(Math.random() * (SEED_MAX + 1));
+    train({ mode: 'keep' });
+  });
+
+  state.readValidation = buildParamControls(
+    dom.validationControl,
+    [
+      {
+        name: 'validation_split',
+        label: 'Validation split',
+        type: 'float',
+        default: state.validationSplit,
+        min: 0,
+        max: 0.5,
+        step: 0.05,
+        help:
+          'Fraction of points held out of training and scored separately. ' +
+          'The gap between training and validation is overfitting. 0 disables it.',
+      },
+    ],
+    {
+      values: { validation_split: state.validationSplit },
+      onChange: (_name, value) => {
+        state.validationSplit = value;
+        resample.disabled = value <= 0;
+        if (autoRun()) scheduleTrain(120);
+        else markStale('model');
+      },
+    }
+  );
+
+  // Nothing to redraw when no points are being held back.
+  resample.disabled = state.validationSplit <= 0;
+  dom.validationControl.appendChild(resample);
 }
 
 async function generateData({ mode = 'final' } = {}) {
@@ -441,6 +513,8 @@ async function train({ mode = 'keep' } = {}) {
       points: plot.points,
       viewport: VIEWPORT,
       grid_resolution: Number(dom.resolutionSelect.value),
+      validation_split: currentSpec().task === 'clustering' ? 0 : state.validationSplit,
+      validation_seed: state.validationSeed,
     });
     state.result = result;
     state.stale = false;

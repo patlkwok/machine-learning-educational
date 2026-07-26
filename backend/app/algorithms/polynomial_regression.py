@@ -10,7 +10,16 @@ from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.linear_model import Ridge
 
 from ..grid import Grid
-from .base import AlgorithmSpec, FitResult, Param, Step, prepare_regression
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_regression,
+    split_notes,
+)
 
 SPEC = AlgorithmSpec(
     id="polynomial_regression",
@@ -57,16 +66,6 @@ SPEC = AlgorithmSpec(
             step=0.01,
             help="L2 shrinkage on the coefficients. 0 is plain least squares.",
         ),
-        Param(
-            name="cv_folds",
-            label="Cross-validation folds",
-            type="int",
-            default=5,
-            min=2,
-            max=10,
-            step=1,
-            help="Folds used for the validation-error curve.",
-        ),
     ],
 )
 
@@ -83,15 +82,14 @@ def _pipeline(degree: int, alpha: float) -> Pipeline:
     )
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     X, y = prepare_regression(points)
     max_degree = int(params["max_degree"])
     alpha = float(params["alpha"])
-    folds = int(params["cv_folds"])
 
-    n = len(y)
-    can_cv = n >= max(4, folds)
-    cv = KFold(n_splits=min(folds, n), shuffle=True, random_state=0) if can_cv else None
+    split = make_split(len(y), validation)
+    X_train, y_train = X[split.train], y[split.train]
+    X_val, y_val = X[split.val], y[split.val]
 
     curve_x = grid.curve_x()
     steps: list[Step] = []
@@ -99,19 +97,19 @@ def fit(points, params, grid: Grid) -> FitResult:
 
     for degree in range(1, max_degree + 1):
         model = _pipeline(degree, alpha)
-        model.fit(X, y)
-        pred = model.predict(X)
-        train_mse = float(mean_squared_error(y, pred))
-        train_r2 = float(r2_score(y, pred))
+        model.fit(X_train, y_train)
 
-        cv_mse = None
-        if cv is not None:
-            scores = cross_val_score(
-                _pipeline(degree, alpha), X, y, cv=cv, scoring="neg_mean_squared_error"
-            )
-            cv_mse = float(-np.mean(scores))
-            if np.isfinite(cv_mse) and cv_mse < best[0]:
-                best = (cv_mse, degree)
+        predicted = model.predict(X_train)
+        train_mse = float(mean_squared_error(y_train, predicted))
+        train_r2 = float(r2_score(y_train, predicted))
+
+        val_mse = val_r2 = None
+        if split.active:
+            predicted_val = model.predict(X_val)
+            val_mse = float(mean_squared_error(y_val, predicted_val))
+            val_r2 = float(r2_score(y_val, predicted_val))
+            if np.isfinite(val_mse) and val_mse < best[0]:
+                best = (val_mse, degree)
 
         curve_y = np.clip(model.predict(curve_x.reshape(-1, 1)), -Y_CLAMP, Y_CLAMP)
         coefs = model.named_steps["ridge"].coef_
@@ -119,12 +117,12 @@ def fit(points, params, grid: Grid) -> FitResult:
         verdict = ""
         if degree == 1:
             verdict = " Degree 1 is just a straight line — the baseline to beat."
-        elif cv_mse is not None and cv_mse > train_mse * 3 and degree > 3:
+        elif val_mse is not None and val_mse > train_mse * 3 and degree > 3:
             verdict = " Validation error is now far above training error: this is overfitting."
 
         description = (
             f"Degree {degree} polynomial: training MSE {train_mse:.3f}, R² {train_r2:.3f}"
-            + (f", cross-validated MSE {cv_mse:.3f}." if cv_mse is not None else ".")
+            + (f", validation MSE {val_mse:.3f}." if val_mse is not None else ".")
             + verdict
         )
 
@@ -134,8 +132,9 @@ def fit(points, params, grid: Grid) -> FitResult:
                 description=description,
                 metrics={
                     "train_mse": train_mse,
-                    "cv_mse": cv_mse,
-                    "r2": train_r2,
+                    "val_mse": val_mse,
+                    "train_r2": train_r2,
+                    "val_r2": val_r2,
                     "degree": degree,
                     "coef_norm": float(np.linalg.norm(coefs)),
                 },
@@ -144,14 +143,11 @@ def fit(points, params, grid: Grid) -> FitResult:
             )
         )
 
-    notes = []
-    if cv is None:
+    notes = list(split_notes(split, steps[-1].metrics))
+    if split.active:
         notes.append(
-            f"Cross-validation needs at least {max(4, folds)} points, so only training error is shown."
-        )
-    else:
-        notes.append(
-            f"Lowest cross-validated error is at degree {best[1]} — the best complexity for this data."
+            f"Validation error is lowest at degree {best[1]} — the best complexity for this data, "
+            f"and the degree you would actually ship."
         )
     if alpha == 0 and max_degree >= 10:
         notes.append(
@@ -163,19 +159,18 @@ def fit(points, params, grid: Grid) -> FitResult:
         task="regression",
         steps=steps,
         metric_labels={
-            "train_mse": "Training MSE",
-            "cv_mse": "Cross-validated MSE",
-            "r2": "R² (training)",
+            **METRIC_LABELS,
             "coef_norm": "Coefficient size ‖w‖",
             "degree": "Degree",
         },
-        chart_metrics=["train_mse", "cv_mse"],
+        chart_metrics=["train_mse", "val_mse"],
         summary={
             "Final degree": final.metrics["degree"],
             "Training MSE": final.metrics["train_mse"],
-            "Cross-validated MSE": final.metrics["cv_mse"],
-            "Best degree (CV)": best[1] if cv is not None else None,
+            "Validation MSE": final.metrics["val_mse"],
+            "Best degree": best[1] if split.active else None,
         },
         notes=notes,
-        extras={"best_degree": best[1] if cv is not None else None},
+        split=split,
+        extras={"best_degree": best[1] if split.active else None},
     )

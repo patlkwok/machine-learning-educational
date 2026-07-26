@@ -60,6 +60,13 @@ class FitRequest(BaseModel):
     points: list[Point]
     viewport: ViewportModel = Field(default_factory=ViewportModel)
     grid_resolution: int = Field(default=DEFAULT_RESOLUTION, ge=MIN_RESOLUTION, le=MAX_RESOLUTION)
+    # Fraction of points held back from training and scored separately. Belongs
+    # to the request rather than to any algorithm's params: it is a property of
+    # the data, and every supervised algorithm reports against the same split.
+    validation_split: float = Field(default=0.0, ge=0.0, le=0.5)
+    # Which partition to draw. Separate from the dataset seed so the split can
+    # be redrawn while the data stays fixed.
+    validation_seed: int = Field(default=0, ge=0, le=999_999)
 
     @field_validator("points")
     @classmethod

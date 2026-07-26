@@ -16,6 +16,14 @@ export function buildParamControls(container, params, { values = {}, onChange })
   params.forEach((param) => {
     const current = values[param.name] !== undefined ? values[param.name] : param.default;
 
+    if (param.hidden) {
+      // Draw nothing, but keep reporting the value so it still reaches the API.
+      // Reads `values` live, so whatever changes it — a button, say — is picked up.
+      readers[param.name] = () =>
+        values[param.name] !== undefined ? values[param.name] : param.default;
+      return;
+    }
+
     if (param.type === 'bool') {
       const label = document.createElement('label');
       label.className = 'checkbox';
@@ -54,6 +62,30 @@ export function buildParamControls(container, params, { values = {}, onChange })
       field.appendChild(select);
       select.addEventListener('change', () => onChange(param.name, select.value));
       readers[param.name] = () => select.value;
+    } else if (param.slider === false) {
+      // Typed-only: a slider is meaningless where neighbouring values have no
+      // relationship to each other, as with a random seed.
+      const min = param.min ?? 0;
+      const max = param.max ?? Number.MAX_SAFE_INTEGER;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.setAttribute('aria-label', param.label);
+      input.value = String(current);
+      field.appendChild(input);
+
+      let value = Math.min(Math.max(Number(current) || 0, min), max);
+      const commit = () => {
+        const typed = Number(input.value.trim());
+        if (Number.isFinite(typed)) value = Math.round(Math.min(Math.max(typed, min), max));
+        input.value = String(value);
+        onChange(param.name, value);
+      };
+      input.addEventListener('change', commit);
+      readers[param.name] = () => value;
+      // Let callers overwrite the field without rebuilding the whole panel.
+      field.dataset.param = param.name;
+      input.dataset.role = 'value';
     } else {
       const min = param.min ?? 0;
       const max = param.max ?? 100;

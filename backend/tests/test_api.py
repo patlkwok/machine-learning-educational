@@ -251,8 +251,225 @@ def test_params_are_echoed_and_clamped():
 
 def test_gradient_descent_reduces_error():
     payload = fit("linear_regression", points_for("regression"), {"learning_rate": 0.1, "epochs": 40})
-    mse = [step["metrics"]["mse"] for step in payload["steps"]]
+    mse = [step["metrics"]["train_mse"] for step in payload["steps"]]
     assert mse[-1] < mse[0]
+
+
+# --------------------------------------------------- validation split --
+
+SUPERVISED = {a: t for a, t in ALGORITHM_TASKS.items() if t != "clustering"}
+
+
+def fit_split(algorithm, points, split, params=None):
+    response = client.post(
+        "/api/fit",
+        json={
+            "algorithm": algorithm,
+            "params": params or {},
+            "points": points,
+            "viewport": VIEWPORT,
+            "grid_resolution": RESOLUTION,
+            "validation_split": split,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.mark.parametrize("algorithm,task", sorted(SUPERVISED.items()))
+def test_every_supervised_algorithm_reports_validation_metrics(algorithm, task):
+    payload = fit_split(algorithm, points_for(task), 0.25)
+    keys = {series["key"] for series in payload["metric_series"]}
+    assert any(key.startswith("val_") for key in keys), f"no validation series: {sorted(keys)}"
+    assert any(key.startswith("train_") for key in keys), f"no training series: {sorted(keys)}"
+
+    split = payload["split"]
+    assert split["n_validation"] > 0
+    assert split["n_train"] + split["n_validation"] == len(points_for(task))
+    # Every step must carry both, so the chart never has a ragged series.
+    for step in payload["steps"]:
+        assert any(k.startswith("val_") and v is not None for k, v in step["metrics"].items())
+
+
+@pytest.mark.parametrize("algorithm,task", sorted(SUPERVISED.items()))
+def test_zero_split_reports_training_metrics_only(algorithm, task):
+    payload = fit_split(algorithm, points_for(task), 0.0)
+    keys = {series["key"] for series in payload["metric_series"]}
+    assert not any(key.startswith("val_") for key in keys), sorted(keys)
+    assert payload["split"]["n_validation"] == 0
+    assert any("No points are held back" in note for note in payload["notes"])
+
+
+def test_validation_points_are_excluded_from_training():
+    """The held-out indices must be a genuine partition of the point list."""
+    points = points_for("classification")
+    payload = fit_split("decision_tree", points, 0.3)
+    held = payload["split"]["validation_indices"]
+
+    assert len(held) == len(set(held)), "indices must be unique"
+    assert all(0 <= i < len(points) for i in held)
+    assert len(held) == payload["split"]["n_validation"]
+    assert payload["split"]["n_train"] == len(points) - len(held)
+
+
+def test_split_is_stratified_for_classification():
+    points = points_for("classification")
+    payload = fit_split("knn", points, 0.4)
+    held = set(payload["split"]["validation_indices"])
+    labels = [p["label"] for i, p in enumerate(points) if i in held]
+    # Both classes must appear on the held-out side, or validation accuracy is
+    # measuring something other than the model's ability to separate them.
+    assert len(set(labels)) == 2, f"held-out labels: {set(labels)}"
+
+
+def test_split_is_deterministic():
+    points = points_for("classification")
+    first = fit_split("svm", points, 0.3)["split"]["validation_indices"]
+    second = fit_split("svm", points, 0.3)["split"]["validation_indices"]
+    assert first == second
+
+
+def fit_reseed(algorithm, points, split, seed):
+    response = client.post(
+        "/api/fit",
+        json={
+            "algorithm": algorithm,
+            "points": points,
+            "viewport": VIEWPORT,
+            "grid_resolution": RESOLUTION,
+            "validation_split": split,
+            "validation_seed": seed,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_resampling_redraws_the_split_without_touching_the_data():
+    """The whole point: a different partition of exactly the same points."""
+    points = points_for("classification")
+    first = fit_reseed("knn", points, 0.3, 0)
+    second = fit_reseed("knn", points, 0.3, 12345)
+
+    a = set(first["split"]["validation_indices"])
+    b = set(second["split"]["validation_indices"])
+    assert a != b, "a new seed must give a new partition"
+    assert len(a) == len(b) == first["split"]["n_validation"]
+    # Same data, same sizes: only which points were held back has changed.
+    assert first["split"]["n_train"] == second["split"]["n_train"]
+    assert first["params"] == second["params"]
+
+
+def test_resampling_is_itself_reproducible():
+    points = points_for("classification")
+    first = fit_reseed("decision_tree", points, 0.3, 777)["split"]["validation_indices"]
+    second = fit_reseed("decision_tree", points, 0.3, 777)["split"]["validation_indices"]
+    assert first == second
+
+
+def test_every_resample_stays_stratified():
+    points = points_for("classification")
+    for seed in (0, 1, 99, 4242, 999999):
+        payload = fit_reseed("knn", points, 0.4, seed)
+        held = set(payload["split"]["validation_indices"])
+        labels = {p["label"] for i, p in enumerate(points) if i in held}
+        assert len(labels) == 2, f"seed {seed} held out only class {labels}"
+
+
+def test_validation_seed_is_rejected_outside_its_range():
+    for bad in (-1, 1_000_000):
+        response = client.post(
+            "/api/fit",
+            json={
+                "algorithm": "knn",
+                "points": points_for("classification"),
+                "viewport": VIEWPORT,
+                "validation_split": 0.2,
+                "validation_seed": bad,
+            },
+        )
+        assert response.status_code == 422, bad
+
+
+MIN_TRAIN_POINTS = 4  # mirrors base.MIN_TRAIN_POINTS
+
+
+@pytest.mark.parametrize("n_points", [4, 5, 6, 10, 40])
+def test_split_never_starves_the_training_set(n_points):
+    """Validation is given up before the training set drops below the minimum."""
+    points = [{"x": i * 0.4 - 2, "y": (i % 2) * 1.5, "label": i % 2} for i in range(n_points)]
+    payload = fit_split("knn", points, 0.5)  # the largest split on offer
+    assert payload["split"]["n_train"] >= min(MIN_TRAIN_POINTS, n_points)
+    assert payload["split"]["n_train"] + payload["split"]["n_validation"] == n_points
+
+
+def test_dataset_too_small_to_split_says_so():
+    """At 4 points there is nothing to spare, so the split is refused outright."""
+    points = [{"x": i * 0.9 - 1.5, "y": (i % 2) * 1.5, "label": i % 2} for i in range(4)]
+    payload = fit_split("knn", points, 0.5)
+    assert payload["split"]["n_validation"] == 0
+    assert payload["split"]["n_train"] == 4
+    assert any("too few points" in note.lower() for note in payload["notes"])
+
+
+def test_overfitting_gap_is_called_out():
+    """A deep tree on noisy data should trip the overfitting note."""
+    points = [
+        {**p, "label": p["label"]}
+        for p in datasets.generate("uniform", n_samples=120, noise=0.5, seed=1, classes=2)
+    ]
+    payload = fit_split("decision_tree", points, 0.3, {"max_depth": 12})
+    final = payload["steps"][-1]["metrics"]
+    assert final["train_accuracy"] > final["val_accuracy"]
+    assert any("overfitting" in note.lower() for note in payload["notes"])
+
+
+def test_split_is_rejected_outside_its_range():
+    for bad in (-0.1, 0.75):
+        response = client.post(
+            "/api/fit",
+            json={
+                "algorithm": "knn",
+                "points": points_for("classification"),
+                "viewport": VIEWPORT,
+                "validation_split": bad,
+            },
+        )
+        assert response.status_code == 422, bad
+
+
+def test_clustering_ignores_the_split():
+    payload = fit_split("kmeans", points_for("clustering"), 0.4)
+    assert payload["split"] is None
+
+
+def test_kmeans_offers_a_reseed_button_instead_of_a_seed_slider():
+    catalogue = client.get("/api/algorithms").json()
+    kmeans = next(s for s in catalogue["algorithms"] if s["id"] == "kmeans")
+
+    seed = next(p for p in kmeans["params"] if p["name"] == "seed")
+    assert seed["hidden"] is True, "the seed number should never be drawn"
+    assert kmeans["reseed"] == {
+        "param": "seed",
+        "label": kmeans["reseed"]["label"],
+        "help": kmeans["reseed"]["help"],
+    }
+    assert kmeans["reseed"]["param"] == "seed"
+    assert kmeans["reseed"]["label"]
+
+    # No other algorithm shows a visible seed control either.
+    for spec in catalogue["algorithms"]:
+        visible = [p["name"] for p in spec["params"] if not p["hidden"]]
+        assert not any("seed" in name for name in visible), f"{spec['id']}: {visible}"
+
+
+def test_kmeans_reseeding_changes_the_starting_centroids():
+    points = points_for("clustering")
+    first = fit("kmeans", points, {"init": "random", "seed": 1})
+    second = fit("kmeans", points, {"init": "random", "seed": 98765})
+    assert first["steps"][0]["extras"]["centroids"] != second["steps"][0]["extras"]["centroids"]
+    # Same seed must still reproduce, so a run can be reasoned about.
+    assert fit("kmeans", points, {"init": "random", "seed": 1})["steps"] == first["steps"]
 
 
 def test_kmeans_inertia_never_increases():
@@ -405,6 +622,38 @@ def test_svm_reports_support_vectors():
     assert final["metrics"]["n_support"] >= 2
     assert final["extras"]["support_indices"]
     assert len(final["extras"]["margin_lines"]) == 3  # boundary plus both margins
+
+
+def test_svm_frame_budget_only_trims_on_large_datasets():
+    """Each SVM frame refits the solver, so the budget scales with dataset size."""
+    small = [
+        {**p} for p in datasets.generate("moons", n_samples=200, noise=0.2, seed=5)
+    ]
+    large = [
+        {**p} for p in datasets.generate("moons", n_samples=1000, noise=0.2, seed=5)
+    ]
+
+    asked = 20
+    small_payload = fit("svm", small, {"frames": asked})
+    large_payload = fit("svm", large, {"frames": asked})
+
+    # Small datasets get every frame they asked for, and say nothing about it.
+    assert not any("requested frames" in note for note in small_payload["notes"])
+    # Large ones are trimmed, and say so rather than silently disagreeing.
+    assert len(large_payload["steps"]) < len(small_payload["steps"])
+    assert any("requested frames" in note for note in large_payload["notes"])
+    # Never trimmed so far that the animation stops being an animation.
+    assert len(large_payload["steps"]) >= 6
+
+
+def test_generator_supports_the_full_point_range():
+    """The frontend slider tops out at 1000; the API must accept that."""
+    response = client.post(
+        "/api/generate",
+        json={"generator": "moons", "n_samples": 1000, "noise": 0.2, "seed": 1, "classes": 2},
+    )
+    assert response.status_code == 200
+    assert len(response.json()["points"]) == 1000
 
 
 def test_mlp_emits_a_network_diagram():

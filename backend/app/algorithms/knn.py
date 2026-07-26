@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.neighbors import KNeighborsClassifier
 
 from ..grid import Grid, class_surface, confidence_from_scores
-from .base import AlgorithmSpec, FitResult, Param, Step, prepare_labelled, thin
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_labelled,
+    split_notes,
+    thin,
+)
 
 SPEC = AlgorithmSpec(
     id="knn",
@@ -70,50 +79,40 @@ SPEC = AlgorithmSpec(
 )
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     data = prepare_labelled(points)
     weights = params["weights"]
     metric = params["metric"]
 
-    n = len(data.y)
-    max_k = int(min(int(params["max_k"]), n))
-    ks = thin(list(range(1, max_k + 1)))
+    split = make_split(len(data.y), validation, data.y)
+    X_train, y_train = data.X[split.train], data.y[split.train]
+    X_val, y_val = data.X[split.val], data.y[split.val]
 
-    counts = np.bincount(data.y, minlength=data.n_classes)
-    folds = int(min(5, counts.min()))
-    can_cv = folds >= 2
-    cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=0) if can_cv else None
+    # k can never exceed the number of points the model actually stores.
+    max_k = int(min(int(params["max_k"]), len(y_train)))
+    ks = thin(list(range(1, max_k + 1)))
 
     steps: list[Step] = []
     best = (-1.0, 1)
 
     for k in ks:
         model = KNeighborsClassifier(n_neighbors=k, weights=weights, metric=metric)
-        model.fit(data.X, data.y)
-        train_acc = float((model.predict(data.X) == data.y).mean())
+        model.fit(X_train, y_train)
+        train_acc = float((model.predict(X_train) == y_train).mean())
 
-        cv_acc = None
-        if cv is not None and k < n - n // folds:
-            cv_acc = float(
-                np.mean(
-                    cross_val_score(
-                        KNeighborsClassifier(n_neighbors=k, weights=weights, metric=metric),
-                        data.X,
-                        data.y,
-                        cv=cv,
-                    )
-                )
-            )
-            if cv_acc > best[0]:
-                best = (cv_acc, k)
+        val_acc = None
+        if split.active:
+            val_acc = float((model.predict(X_val) == y_val).mean())
+            if val_acc > best[0]:
+                best = (val_acc, k)
 
         proba = model.predict_proba(grid.points)
         labels = np.argmax(proba, axis=1)
 
         if k == 1:
             note = " With k = 1 every training point owns a Voronoi cell, so training accuracy is trivially perfect."
-        elif cv_acc is not None and train_acc - cv_acc > 0.15:
-            note = " Training accuracy is well above cross-validated accuracy — still memorising."
+        elif val_acc is not None and train_acc - val_acc > 0.15:
+            note = " Training accuracy is well above validation accuracy — still memorising."
         else:
             note = ""
 
@@ -123,10 +122,10 @@ def fit(points, params, grid: Grid) -> FitResult:
                 description=(
                     f"Each point on the plane takes a vote of its {k} nearest neighbour"
                     f"{'s' if k > 1 else ''}. Training accuracy {train_acc * 100:.1f}%"
-                    + (f", cross-validated {cv_acc * 100:.1f}%." if cv_acc is not None else ".")
+                    + (f", validation {val_acc * 100:.1f}%." if val_acc is not None else ".")
                     + note
                 ),
-                metrics={"train_accuracy": train_acc, "cv_accuracy": cv_acc, "k": k},
+                metrics={"train_accuracy": train_acc, "val_accuracy": val_acc, "k": k},
                 surface=class_surface(
                     labels, n_classes=data.n_classes, confidence=confidence_from_scores(proba)
                 ),
@@ -135,29 +134,23 @@ def fit(points, params, grid: Grid) -> FitResult:
         )
 
     notes = ["k-NN never trains: every frame is the same stored data, queried differently."]
-    if cv is None:
-        notes.append(
-            "Cross-validation needs at least 2 points in the smallest class, so only training accuracy is shown."
-        )
-    else:
-        notes.append(f"Best cross-validated k for this dataset: k = {best[1]} ({best[0] * 100:.1f}%).")
+    notes.extend(split_notes(split, steps[-1].metrics))
+    if split.active:
+        notes.append(f"Best validation accuracy is at k = {best[1]} ({best[0] * 100:.1f}%).")
 
     final = steps[-1]
     return FitResult(
         task="classification",
         steps=steps,
-        metric_labels={
-            "train_accuracy": "Training accuracy",
-            "cv_accuracy": "Cross-validated accuracy",
-            "k": "k",
-        },
-        chart_metrics=["train_accuracy", "cv_accuracy"],
+        metric_labels={**METRIC_LABELS, "k": "k"},
+        chart_metrics=["train_accuracy", "val_accuracy"],
         summary={
             "Final k": final.metrics["k"],
             "Training accuracy": final.metrics["train_accuracy"],
-            "Cross-validated accuracy": final.metrics["cv_accuracy"],
-            "Best k (CV)": best[1] if cv is not None else None,
+            "Validation accuracy": final.metrics["val_accuracy"],
+            "Best k": best[1] if split.active else None,
         },
         notes=notes,
-        extras={"class_values": data.class_values, "best_k": best[1] if cv is not None else None},
+        split=split,
+        extras={"class_values": data.class_values, "best_k": best[1] if split.active else None},
     )

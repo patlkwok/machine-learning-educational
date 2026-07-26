@@ -7,7 +7,16 @@ from sklearn.metrics import log_loss
 from sklearn.naive_bayes import GaussianNB
 
 from ..grid import Grid, class_surface, confidence_from_scores
-from .base import AlgorithmSpec, FitResult, Param, Step, prepare_labelled
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_labelled,
+    split_notes,
+)
 
 SPEC = AlgorithmSpec(
     id="naive_bayes",
@@ -85,25 +94,29 @@ def _ellipses(model: GaussianNB, class_values: list[int]) -> list[dict]:
     return out
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     data = prepare_labelled(points, min_per_class=2)
     n_chunks = int(params["chunks"])
     var_smoothing = float(params["var_smoothing"])
     equal_priors = bool(params["equal_priors"])
 
+    split = make_split(len(data.y), validation, data.y)
+    X_train, y_train = data.X[split.train], data.y[split.train]
+    X_val, y_val = data.X[split.val], data.y[split.val]
+
     classes = np.arange(data.n_classes)
     priors = np.full(data.n_classes, 1.0 / data.n_classes) if equal_priors else None
     model = GaussianNB(var_smoothing=var_smoothing, priors=priors)
 
-    # Shuffle, then make sure the first chunk contains every class so the very
-    # first partial_fit is well defined.
+    # Shuffle the training points, then make sure the first chunk contains every
+    # class so the very first partial_fit is well defined.
     rng = np.random.default_rng(0)
-    order = rng.permutation(len(data.y))
-    first = [int(np.flatnonzero(data.y[order] == c)[0]) for c in classes]
+    order = rng.permutation(len(y_train))
+    first = [int(np.flatnonzero(y_train[order] == c)[0]) for c in classes]
     rest = [i for i in range(len(order)) if i not in set(first)]
     order = order[np.array(first + rest)]
 
-    X, y = data.X[order], data.y[order]
+    X, y = X_train[order], y_train[order]
     n_chunks = int(min(n_chunks, max(1, len(y) - len(first) + 1)))
     bounds = np.linspace(len(first), len(y), n_chunks + 1).round().astype(int)
     bounds[0] = max(len(first), 1)
@@ -118,9 +131,15 @@ def fit(points, params, grid: Grid) -> FitResult:
         model.partial_fit(X[start:end], y[start:end], classes=classes if chunk == 0 else None)
         seen = end
 
-        proba_train = model.predict_proba(data.X)
-        acc = float((np.argmax(proba_train, axis=1) == data.y).mean())
-        loss = float(log_loss(data.y, proba_train, labels=classes))
+        proba_train = model.predict_proba(X_train)
+        acc = float((np.argmax(proba_train, axis=1) == y_train).mean())
+        loss = float(log_loss(y_train, proba_train, labels=classes))
+
+        val_acc = val_loss = None
+        if split.active:
+            proba_val = model.predict_proba(X_val)
+            val_acc = float((np.argmax(proba_val, axis=1) == y_val).mean())
+            val_loss = float(log_loss(y_val, proba_val, labels=classes))
 
         proba_grid = model.predict_proba(grid.points)
         labels = np.argmax(proba_grid, axis=1)
@@ -129,11 +148,18 @@ def fit(points, params, grid: Grid) -> FitResult:
             Step(
                 label=f"{seen}/{len(y)} points",
                 description=(
-                    f"Estimates updated from {seen} of {len(y)} points. Accuracy on the full set "
-                    f"{acc * 100:.1f}%, log loss {loss:.3f}. The dashed ellipses are each class's "
-                    f"fitted 2σ contour."
+                    f"Estimates updated from {seen} of {len(y)} training points. Training accuracy "
+                    f"{acc * 100:.1f}%"
+                    + (f", validation {val_acc * 100:.1f}%." if val_acc is not None else ".")
+                    + " The dashed ellipses are each class's fitted 2σ contour."
                 ),
-                metrics={"accuracy": acc, "log_loss": loss, "points_seen": seen},
+                metrics={
+                    "train_accuracy": acc,
+                    "val_accuracy": val_acc,
+                    "train_log_loss": loss,
+                    "val_log_loss": val_loss,
+                    "points_seen": seen,
+                },
                 surface=class_surface(
                     labels, n_classes=data.n_classes, confidence=confidence_from_scores(proba_grid)
                 ),
@@ -150,22 +176,21 @@ def fit(points, params, grid: Grid) -> FitResult:
     ]
     if equal_priors:
         notes.append("Priors are forced equal, so class sizes do not influence the boundary.")
+    notes.extend(split_notes(split, steps[-1].metrics))
 
     final = steps[-1]
     return FitResult(
         task="classification",
         steps=steps,
-        metric_labels={
-            "accuracy": "Accuracy",
-            "log_loss": "Log loss",
-            "points_seen": "Points seen",
-        },
-        chart_metrics=["accuracy", "log_loss"],
+        metric_labels={**METRIC_LABELS, "points_seen": "Points seen"},
+        chart_metrics=["train_accuracy", "val_accuracy", "train_log_loss", "val_log_loss"],
         summary={
-            "Accuracy": final.metrics["accuracy"],
-            "Log loss": final.metrics["log_loss"],
+            "Training accuracy": final.metrics["train_accuracy"],
+            "Validation accuracy": final.metrics["val_accuracy"],
+            "Log loss": final.metrics["train_log_loss"],
             "Classes": data.n_classes,
         },
         notes=notes,
+        split=split,
         extras={"class_values": data.class_values},
     )

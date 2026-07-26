@@ -8,7 +8,17 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
 from ..grid import Grid, class_surface, confidence_from_scores
-from .base import AlgorithmSpec, FitResult, Param, Step, prepare_labelled, thin
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_labelled,
+    split_notes,
+    thin,
+)
 
 SPEC = AlgorithmSpec(
     id="random_forest",
@@ -88,8 +98,11 @@ SPEC = AlgorithmSpec(
 )
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     data = prepare_labelled(points, min_per_class=2)
+    split = make_split(len(data.y), validation, data.y)
+    X_train, y_train = data.X[split.train], data.y[split.train]
+    X_val, y_val = data.X[split.val], data.y[split.val]
     n_estimators = int(params["n_estimators"])
     max_depth = int(params["max_depth"])
     max_features = None if params["max_features"] == "all" else "sqrt"
@@ -116,9 +129,12 @@ def fit(points, params, grid: Grid) -> FitResult:
         warnings.simplefilter("ignore", category=UserWarning)
         for count in schedule:
             model.set_params(n_estimators=count)
-            model.fit(data.X, data.y)
+            model.fit(X_train, y_train)
 
-            train_acc = float((model.predict(data.X) == data.y).mean())
+            train_acc = float((model.predict(X_train) == y_train).mean())
+            val_acc = (
+                float((model.predict(X_val) == y_val).mean()) if split.active else None
+            )
             oob = getattr(model, "oob_score_", None)
             oob = float(oob) if oob is not None and np.isfinite(oob) else None
 
@@ -143,10 +159,16 @@ def fit(points, params, grid: Grid) -> FitResult:
                     description=(
                         f"{count} tree{'s' if count > 1 else ''} voting. Training accuracy "
                         f"{train_acc * 100:.1f}%"
-                        + (f", out-of-bag accuracy {oob * 100:.1f}%." if oob is not None else ".")
+                        + (f", validation {val_acc * 100:.1f}%" if val_acc is not None else "")
+                        + (f", out-of-bag {oob * 100:.1f}%." if oob is not None else ".")
                         + note
                     ),
-                    metrics={"train_accuracy": train_acc, "oob_accuracy": oob, "n_trees": count},
+                    metrics={
+                        "train_accuracy": train_acc,
+                        "val_accuracy": val_acc,
+                        "oob_accuracy": oob,
+                        "n_trees": count,
+                    },
                     surface=class_surface(
                         labels,
                         n_classes=data.n_classes,
@@ -164,23 +186,26 @@ def fit(points, params, grid: Grid) -> FitResult:
     ]
     if show_single:
         notes.append("The faint dashed regions are the newest single tree, for comparison with the ensemble.")
+    notes.extend(split_notes(split, steps[-1].metrics))
 
     final = steps[-1]
     return FitResult(
         task="classification",
         steps=steps,
         metric_labels={
-            "train_accuracy": "Training accuracy",
+            **METRIC_LABELS,
             "oob_accuracy": "Out-of-bag accuracy",
             "n_trees": "Trees",
         },
-        chart_metrics=["train_accuracy", "oob_accuracy"],
+        chart_metrics=["train_accuracy", "val_accuracy", "oob_accuracy"],
         summary={
             "Trees": final.metrics["n_trees"],
             "Training accuracy": final.metrics["train_accuracy"],
+            "Validation accuracy": final.metrics["val_accuracy"],
             "Out-of-bag accuracy": final.metrics["oob_accuracy"],
         },
         notes=notes,
+        split=split,
         extras={
             "class_values": data.class_values,
             "feature_importances": importances.tolist(),

@@ -29,12 +29,20 @@ SPEC = AlgorithmSpec(
     ],
     watch_for=[
         "Inertia drops steeply on the first couple of iterations, then barely moves. Most of the work happens early.",
-        "Set the initialisation to random and re-run with different seeds: sometimes it lands in a visibly worse local optimum.",
+        "Switch initialisation to random, then press \"New starting centroids\" a few times: sometimes it lands in a visibly worse local optimum. Do the same with k-means++ and the answer barely moves — that is the whole point of it.",
         "Ask for the wrong k — say 4 on 3 blobs — and it will happily split a real cluster in half. k-means always finds exactly k clusters, whether or not they exist.",
         "On the stretched-blobs dataset the round Voronoi cells cut straight across the elongated clusters. k-means assumes clusters are round and equally sized.",
     ],
     step_unit="phase",
     step_hint="Frames alternate between the assign step and the update step.",
+    reseed={
+        "param": "seed",
+        "label": "New starting centroids",
+        "help": (
+            "Restart from a different initial guess. With random initialisation the "
+            "result can change completely; with k-means++ it usually does not."
+        ),
+    },
     params=[
         Param(
             name="k",
@@ -59,13 +67,16 @@ SPEC = AlgorithmSpec(
         ),
         Param(
             name="seed",
-            label="Random seed",
+            label="Starting centroids",
             type="int",
             default=0,
             min=0,
-            max=999,
+            max=999999,
             step=1,
-            help="Change this to see a different starting configuration.",
+            # Driven by the "New starting centroids" button below: the number
+            # itself teaches nothing, but changing it teaches a great deal.
+            hidden=True,
+            help="Which starting configuration to use.",
         ),
         Param(
             name="max_iter",
@@ -90,7 +101,9 @@ def _inertia(X: np.ndarray, centroids: np.ndarray, labels: np.ndarray) -> float:
     return float(((X - centroids[labels]) ** 2).sum())
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
+    # validation is unused: clustering has no labels to score a holdout against.
+    del validation
     k = int(params["k"])
     seed = int(params["seed"])
     max_iter = int(params["max_iter"])

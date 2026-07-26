@@ -10,7 +10,21 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 from ..grid import Grid, class_surface, margin_confidence
-from .base import AlgorithmSpec, FitResult, Param, Step, geometric_schedule, prepare_labelled
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_labelled,
+    split_notes,
+    geometric_schedule,
+)
+
+# Dataset size at which the requested frame count is delivered in full; above
+# it the budget is scaled down in proportion. See the note in fit().
+FRAME_REFERENCE_POINTS = 600
 
 SPEC = AlgorithmSpec(
     id="svm",
@@ -124,7 +138,7 @@ def _hinge_loss(decision: np.ndarray, y: np.ndarray, n_classes: int) -> float | 
     return float(np.mean(np.maximum(0.0, 1.0 - signed * decision)))
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     data = prepare_labelled(points)
     kernel = params["kernel"]
     C = float(params["C"])
@@ -132,8 +146,19 @@ def fit(points, params, grid: Grid) -> FitResult:
     degree = int(params["degree"])
     frames = int(params["frames"])
 
-    scaler = StandardScaler().fit(data.X)
-    Xs = scaler.transform(data.X)
+    split = make_split(len(data.y), validation, data.y)
+    X_train, y_train = data.X[split.train], data.y[split.train]
+    X_val, y_val = data.X[split.val], data.y[split.val]
+
+    # Unlike the other animations, every SVM frame refits the solver from
+    # scratch, so cost grows with frames x n^2. Past a few hundred points, trim
+    # the frame budget instead of letting a full-size dataset take seconds:
+    # consecutive solver checkpoints look near-identical at that scale anyway.
+    frame_budget = int(np.clip(frames * FRAME_REFERENCE_POINTS / max(len(y_train), 1), 6, frames))
+
+    scaler = StandardScaler().fit(X_train)
+    Xs = scaler.transform(X_train)
+    Xs_val = scaler.transform(X_val) if split.active else None
     grid_s = scaler.transform(grid.points)
 
     def make(max_iter: int) -> SVC:
@@ -146,26 +171,28 @@ def fit(points, params, grid: Grid) -> FitResult:
             cache_size=200,
         )
 
+    scored = (Xs, y_train, Xs_val, y_val, split, scaler)
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ConvergenceWarning)
-        converged = make(-1).fit(Xs, data.y)
+        converged = make(-1).fit(Xs, y_train)
         n_iter = getattr(converged, "n_iter_", None)
         total_iters = int(np.max(n_iter)) if n_iter is not None else 200
         total_iters = int(np.clip(total_iters, 2, 5000))
-        schedule = geometric_schedule(total_iters, frames)
+        schedule = geometric_schedule(total_iters, frame_budget)
 
         steps: list[Step] = []
         for iteration in schedule:
-            model = make(iteration).fit(Xs, data.y)
-            steps.append(_step(model, scaler, data, grid, grid_s, iteration, total_iters, False))
+            model = make(iteration).fit(Xs, y_train)
+            steps.append(_step(model, data, grid, grid_s, iteration, total_iters, False, scored))
         steps.append(
-            _step(converged, scaler, data, grid, grid_s, total_iters, total_iters, True)
+            _step(converged, data, grid, grid_s, total_iters, total_iters, True, scored)
         )
 
     n_sv = int(converged.support_.shape[0])
     notes = [
-        f"{n_sv} of {len(data.y)} points ended up as support vectors "
-        f"({n_sv / len(data.y) * 100:.0f}% of the data defines the entire boundary)."
+        f"{n_sv} of {len(y_train)} training points ended up as support vectors "
+        f"({n_sv / len(y_train) * 100:.0f}% of them define the entire boundary)."
     ]
     if kernel == "linear":
         notes.append("The dashed lines are the ±1 margins; the solid line is the decision boundary.")
@@ -174,62 +201,81 @@ def fit(points, params, grid: Grid) -> FitResult:
             "With a non-linear kernel the margin lives in a higher-dimensional space, so only the "
             "boundary itself is drawn here."
         )
-    if n_sv > 0.8 * len(data.y):
+    if n_sv > 0.8 * len(y_train):
         notes.append(
             "Almost every point is a support vector, which usually means C or gamma is too small "
             "for this data — the model is barely committing to a boundary."
         )
+    if frame_budget < frames:
+        notes.append(
+            f"Showing {frame_budget} of the {frames} requested frames: each one refits the solver "
+            f"over all {len(y_train)} training points, and neighbouring frames are nearly identical "
+            f"on a dataset this size."
+        )
+    notes.extend(split_notes(split, steps[-1].metrics))
 
     final = steps[-1]
     return FitResult(
         task="classification",
         steps=steps,
         metric_labels={
-            "accuracy": "Training accuracy",
+            **METRIC_LABELS,
             "n_support": "Support vectors",
             "hinge_loss": "Hinge loss",
         },
-        chart_metrics=["accuracy", "n_support", "hinge_loss"],
+        chart_metrics=["train_accuracy", "val_accuracy", "n_support"],
         summary={
-            "Accuracy": final.metrics["accuracy"],
+            "Training accuracy": final.metrics["train_accuracy"],
+            "Validation accuracy": final.metrics["val_accuracy"],
             "Support vectors": final.metrics["n_support"],
             "Kernel": kernel,
             "Solver iterations": total_iters,
         },
         notes=notes,
+        split=split,
         extras={"class_values": data.class_values, "kernel": kernel},
     )
 
 
-def _step(model, scaler, data, grid, grid_s, iteration, total, final) -> Step:
+def _step(model, data, grid, grid_s, iteration, total, final, scored) -> Step:
+    Xs, y_train, Xs_val, y_val, split, scaler = scored
     decision = model.decision_function(grid_s)
     labels = model.predict(grid_s)
-    acc = float((model.predict(scaler.transform(data.X)) == data.y).mean())
+    acc = float((model.predict(Xs) == y_train).mean())
+    val_acc = float((model.predict(Xs_val) == y_val).mean()) if split.active else None
     n_sv = int(model.support_.shape[0])
-    hinge = _hinge_loss(model.decision_function(scaler.transform(data.X)), data.y, data.n_classes)
+    hinge = _hinge_loss(model.decision_function(Xs), y_train, data.n_classes)
 
     label = "Converged" if final else f"Iteration {iteration}"
     if final:
         description = (
-            f"Solver converged after {total} iterations: accuracy {acc * 100:.1f}%, "
-            f"{n_sv} support vectors. The circled points are the only ones that matter."
+            f"Solver converged after {total} iterations: training accuracy {acc * 100:.1f}%"
+            + (f", validation {val_acc * 100:.1f}%." if val_acc is not None else ".")
+            + " The circled points are the only ones that matter."
         )
     else:
         description = (
-            f"Solver capped at {iteration} of {total} iterations: accuracy {acc * 100:.1f}%, "
-            f"{n_sv} support vectors so far."
+            f"Solver capped at {iteration} of {total} iterations: training accuracy "
+            f"{acc * 100:.1f}%, {n_sv} support vectors so far."
         )
 
     return Step(
         label=label,
         description=description,
-        metrics={"accuracy": acc, "n_support": n_sv, "hinge_loss": hinge, "iteration": iteration},
+        metrics={
+            "train_accuracy": acc,
+            "val_accuracy": val_acc,
+            "n_support": n_sv,
+            "hinge_loss": hinge,
+            "iteration": iteration,
+        },
         surface=class_surface(
             labels, n_classes=data.n_classes, confidence=margin_confidence(decision)
         ),
         extras={
-            # Indices into the caller's point list, so the frontend can ring them directly.
-            "support_indices": model.support_.tolist(),
+            # model.support_ indexes the training subset; map back so the
+            # frontend can ring the right points in the caller's full list.
+            "support_indices": split.train[model.support_].tolist(),
             "margin_lines": _margin_lines(model, scaler, grid),
             "class_values": data.class_values,
         },

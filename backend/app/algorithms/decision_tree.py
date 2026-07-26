@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.tree import DecisionTreeClassifier
 
 from ..grid import Grid, class_surface, confidence_from_scores
-from .base import AlgorithmSpec, FitResult, Param, Step, prepare_labelled
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_labelled,
+    split_notes,
+)
 
 FEATURE_NAMES = ("x", "y")
 
@@ -122,15 +130,15 @@ def _split_lines(tree, grid: Grid) -> list[dict]:
     return lines
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     data = prepare_labelled(points)
     max_depth = int(params["max_depth"])
     criterion = params["criterion"]
     min_samples_leaf = int(params["min_samples_leaf"])
 
-    counts = np.bincount(data.y, minlength=data.n_classes)
-    folds = int(min(5, counts.min()))
-    cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=0) if folds >= 2 else None
+    split = make_split(len(data.y), validation, data.y)
+    X_train, y_train = data.X[split.train], data.y[split.train]
+    X_val, y_val = data.X[split.val], data.y[split.val]
 
     steps: list[Step] = []
     best = (-1.0, 1)
@@ -142,28 +150,14 @@ def fit(points, params, grid: Grid) -> FitResult:
             criterion=criterion,
             min_samples_leaf=min_samples_leaf,
             random_state=0,
-        ).fit(data.X, data.y)
+        ).fit(X_train, y_train)
 
-        train_acc = float((model.predict(data.X) == data.y).mean())
-        cv_acc = None
-        if cv is not None:
-            cv_acc = float(
-                np.mean(
-                    cross_val_score(
-                        DecisionTreeClassifier(
-                            max_depth=depth,
-                            criterion=criterion,
-                            min_samples_leaf=min_samples_leaf,
-                            random_state=0,
-                        ),
-                        data.X,
-                        data.y,
-                        cv=cv,
-                    )
-                )
-            )
-            if cv_acc > best[0]:
-                best = (cv_acc, depth)
+        train_acc = float((model.predict(X_train) == y_train).mean())
+        val_acc = None
+        if split.active:
+            val_acc = float((model.predict(X_val) == y_val).mean())
+            if val_acc > best[0]:
+                best = (val_acc, depth)
 
         proba = model.predict_proba(grid.points)
         labels = np.argmax(proba, axis=1)
@@ -183,12 +177,12 @@ def fit(points, params, grid: Grid) -> FitResult:
                 label=f"Depth {depth}",
                 description=(
                     f"Depth {actual_depth}, {n_leaves} leaves. Training accuracy {train_acc * 100:.1f}%"
-                    + (f", cross-validated {cv_acc * 100:.1f}%." if cv_acc is not None else ".")
+                    + (f", validation {val_acc * 100:.1f}%." if val_acc is not None else ".")
                     + note
                 ),
                 metrics={
                     "train_accuracy": train_acc,
-                    "cv_accuracy": cv_acc,
+                    "val_accuracy": val_acc,
                     "leaves": n_leaves,
                     "depth": actual_depth,
                 },
@@ -204,28 +198,23 @@ def fit(points, params, grid: Grid) -> FitResult:
         )
 
     notes = ["Every boundary is a horizontal or vertical cut — a tree can only split on one feature at a time."]
-    if cv is not None:
-        notes.append(f"Best cross-validated depth: {best[1]} ({best[0] * 100:.1f}%).")
-    else:
-        notes.append("Cross-validation needs at least 2 points in the smallest class.")
+    notes.extend(split_notes(split, steps[-1].metrics))
+    if split.active:
+        notes.append(f"Best validation accuracy is at depth {best[1]} ({best[0] * 100:.1f}%).")
 
     final = steps[-1]
     return FitResult(
         task="classification",
         steps=steps,
-        metric_labels={
-            "train_accuracy": "Training accuracy",
-            "cv_accuracy": "Cross-validated accuracy",
-            "leaves": "Leaf count",
-            "depth": "Depth",
-        },
-        chart_metrics=["train_accuracy", "cv_accuracy"],
+        metric_labels={**METRIC_LABELS, "leaves": "Leaf count", "depth": "Depth"},
+        chart_metrics=["train_accuracy", "val_accuracy"],
         summary={
             "Depth": final.metrics["depth"],
             "Leaves": final.metrics["leaves"],
             "Training accuracy": final.metrics["train_accuracy"],
-            "Cross-validated accuracy": final.metrics["cv_accuracy"],
+            "Validation accuracy": final.metrics["val_accuracy"],
         },
         notes=notes,
-        extras={"class_values": data.class_values, "best_depth": best[1] if cv is not None else None},
+        split=split,
+        extras={"class_values": data.class_values, "best_depth": best[1] if split.active else None},
     )

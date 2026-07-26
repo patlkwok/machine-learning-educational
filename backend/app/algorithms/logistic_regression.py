@@ -8,7 +8,17 @@ from sklearn.metrics import log_loss
 from sklearn.preprocessing import StandardScaler
 
 from ..grid import Grid, class_surface, confidence_from_scores
-from .base import AlgorithmSpec, FitResult, Param, Step, prepare_labelled, thin
+from .base import (
+    METRIC_LABELS,
+    AlgorithmSpec,
+    FitResult,
+    Param,
+    Step,
+    make_split,
+    prepare_labelled,
+    split_notes,
+    thin,
+)
 
 SPEC = AlgorithmSpec(
     id="logistic_regression",
@@ -90,15 +100,22 @@ def _equation(model, scaler: StandardScaler, class_values: list[int]) -> str:
     return f"P(class {class_values[1]}) = σ({w[0]:.2f}·x + {w[1]:.2f}·y + {b:.2f})"
 
 
-def fit(points, params, grid: Grid) -> FitResult:
+def fit(points, params, grid: Grid, validation: float = 0.0) -> FitResult:
     data = prepare_labelled(points)
     lr = float(params["learning_rate"])
     epochs = int(params["epochs"])
     penalty = params["regularization"]
     alpha = float(params["alpha"])
 
-    scaler = StandardScaler().fit(data.X)
-    Xs = scaler.transform(data.X)
+    split = make_split(len(data.y), validation, data.y)
+    X_train, y_train = data.X[split.train], data.y[split.train]
+    X_val, y_val = data.X[split.val], data.y[split.val]
+
+    # Scaling is fitted on the training points only; using the held-out points
+    # to set the scale would leak them into training.
+    scaler = StandardScaler().fit(X_train)
+    Xs = scaler.transform(X_train)
+    Xs_val = scaler.transform(X_val) if split.active else None
     grid_s = scaler.transform(grid.points)
     classes = np.arange(data.n_classes)
 
@@ -112,17 +129,27 @@ def fit(points, params, grid: Grid) -> FitResult:
         random_state=0,
     )
 
+    def score(X: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+        proba = model.predict_proba(X)
+        return (
+            float(log_loss(y, proba, labels=classes)),
+            float((model.predict(X) == y).mean()),
+        )
+
     frames = []
     for epoch in range(1, epochs + 1):
-        model.partial_fit(Xs, data.y, classes=classes)
+        model.partial_fit(Xs, y_train, classes=classes)
         if not np.isfinite(model.coef_).all():
             break
-        proba = model.predict_proba(Xs)
+        train_loss, train_acc = score(Xs, y_train)
+        val_loss, val_acc = score(Xs_val, y_val) if split.active else (None, None)
         frames.append(
             (
                 epoch,
-                float(log_loss(data.y, proba, labels=classes)),
-                float((model.predict(Xs) == data.y).mean()),
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
                 model.coef_.copy(),
                 model.intercept_.copy(),
                 _equation(model, scaler, data.class_values),
@@ -133,7 +160,7 @@ def fit(points, params, grid: Grid) -> FitResult:
         raise ValueError("Training produced no usable frames; try a smaller learning rate.")
 
     steps: list[Step] = []
-    for epoch, loss, acc, coef, intercept, equation in thin(frames):
+    for epoch, loss, acc, v_loss, v_acc, coef, intercept, equation in thin(frames):
         model.coef_, model.intercept_ = coef, intercept
         proba_grid = model.predict_proba(grid_s)
         labels = np.argmax(proba_grid, axis=1)
@@ -141,10 +168,16 @@ def fit(points, params, grid: Grid) -> FitResult:
             Step(
                 label=f"Epoch {epoch}",
                 description=(
-                    f"After epoch {epoch}: log loss {loss:.4f}, training accuracy {acc * 100:.1f}%. "
-                    f"{equation}"
+                    f"After epoch {epoch}: log loss {loss:.4f}, training accuracy {acc * 100:.1f}%"
+                    + (f", validation accuracy {v_acc * 100:.1f}%. " if v_acc is not None else ". ")
+                    + equation
                 ),
-                metrics={"log_loss": loss, "accuracy": acc},
+                metrics={
+                    "train_log_loss": loss,
+                    "val_log_loss": v_loss,
+                    "train_accuracy": acc,
+                    "val_accuracy": v_acc,
+                },
                 surface=class_surface(
                     labels,
                     n_classes=data.n_classes,
@@ -158,22 +191,25 @@ def fit(points, params, grid: Grid) -> FitResult:
         "The boundary is a straight line by construction — no amount of training makes it bend."
     ]
     final = steps[-1]
-    if final.metrics["accuracy"] < 0.9:
+    if final.metrics["train_accuracy"] < 0.9:
         notes.append(
             "Accuracy is stuck well below 100%, which usually means the classes are not linearly "
             "separable. Try an SVM with an RBF kernel, a decision tree, or the neural network."
         )
+    notes.extend(split_notes(split, final.metrics))
 
     return FitResult(
         task="classification",
         steps=steps,
-        metric_labels={"log_loss": "Log loss", "accuracy": "Training accuracy"},
-        chart_metrics=["log_loss", "accuracy"],
+        metric_labels=METRIC_LABELS,
+        chart_metrics=["train_log_loss", "val_log_loss", "train_accuracy", "val_accuracy"],
         summary={
-            "Accuracy": final.metrics["accuracy"],
-            "Log loss": final.metrics["log_loss"],
+            "Training accuracy": final.metrics["train_accuracy"],
+            "Validation accuracy": final.metrics["val_accuracy"],
+            "Log loss": final.metrics["train_log_loss"],
             "Model": final.extras["equation"],
         },
         notes=notes,
         extras={"class_values": data.class_values},
+        split=split,
     )
