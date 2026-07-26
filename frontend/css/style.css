@@ -258,7 +258,14 @@ code {
 }
 .field-value { font-family: var(--mono); font-size: 11.5px; color: var(--accent-strong); }
 
+/* The negative top margin tucks help text under a slider, whose thin track
+   leaves visual space beneath it. A select is a bordered box with no such
+   space, so the same margin drags the text onto its edge. */
 .field-help { font-size: 11.5px; color: var(--text-faint); margin: -6px 0 12px; }
+select + .field-help { margin-top: 5px; }
+/* Help that follows a whole field rather than sitting inside one, e.g. the
+   dataset description under the Dataset picker. */
+.field + .field-help { margin-top: 0; }
 
 select, input[type="number"], input[type="text"] {
   width: 100%;

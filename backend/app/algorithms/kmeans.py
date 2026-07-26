@@ -29,7 +29,8 @@ SPEC = AlgorithmSpec(
     ],
     watch_for=[
         "Inertia drops steeply on the first couple of iterations, then barely moves. Most of the work happens early.",
-        "Switch initialisation to random, then press \"New starting centroids\" a few times: sometimes it lands in a visibly worse local optimum. Do the same with k-means++ and the answer barely moves — that is the whole point of it.",
+        "To see initialisation matter, you need a hard enough problem: on three well-separated blobs both options find the same answer every single time.",
+        "Try two moons with k = 6, then press \"New starting centroids\" repeatedly. Random starts land on a visibly worse arrangement about twice as often as k-means++, and when they do, they are roughly three times further from the best solution.",
         "Ask for the wrong k — say 4 on 3 blobs — and it will happily split a real cluster in half. k-means always finds exactly k clusters, whether or not they exist.",
         "On the stretched-blobs dataset the round Voronoi cells cut straight across the elongated clusters. k-means assumes clusters are round and equally sized.",
     ],
@@ -39,8 +40,8 @@ SPEC = AlgorithmSpec(
         "param": "seed",
         "label": "New starting centroids",
         "help": (
-            "Restart from a different initial guess. With random initialisation the "
-            "result can change completely; with k-means++ it usually does not."
+            "Restart from a different initial guess. Whether the answer changes depends "
+            "on the data: see the suggestions under Things to try."
         ),
     },
     params=[
