@@ -3,6 +3,7 @@
 from . import (  # noqa: F401
     dbscan,
     decision_tree,
+    gmm,
     hierarchical,
     kmeans,
     knn,
@@ -26,6 +27,7 @@ MODULES = [
     random_forest,
     mlp,
     kmeans,
+    gmm,
     dbscan,
     hierarchical,
 ]

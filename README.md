@@ -9,8 +9,8 @@ Every frame of every animation is a genuine intermediate state of the algorithm:
 gradient descent, one Lloyd iteration of k-means, one more level of tree depth, one more tree in
 the forest. Nothing is faked for the sake of the visuals.
 
-Everything runs on a laptop CPU. The heaviest model here is a two-layer neural network over two
-input features, which trains in a fraction of a second.
+Everything runs on a laptop CPU. The heaviest configuration — a two-layer neural network of 100
+neurons each over 1000 points — trains and renders every frame in about a second.
 
 ```
 ./run.sh          # then open http://127.0.0.1:8000
@@ -23,7 +23,7 @@ input features, which trains in a fraction of a second.
 | Algorithm | Task | What the animation steps through |
 |---|---|---|
 | **Linear regression** | Regression | Epochs of gradient descent, walking towards the closed-form least-squares line (drawn dashed for comparison) |
-| **Polynomial regression** | Regression | Degree 1 → *d*, with training error and cross-validated error side by side so the overfitting U-curve appears |
+| **Polynomial regression** | Regression | Degree 1 → *d*, with training and validation error side by side so the overfitting U-curve appears |
 | **Logistic regression** | Classification | Epochs of SGD on the log loss, with the confidence band around the boundary narrowing |
 | **k-nearest neighbours** | Classification | k = 1 upwards: the Voronoi partition smoothing out as neighbours are added |
 | **Gaussian naive Bayes** | Classification | Data fed in chunks via `partial_fit`, with each class's fitted 2σ ellipse drawn |
@@ -32,12 +32,13 @@ input features, which trains in a fraction of a second.
 | **Random forest** | Classification | One more tree per frame, with an optional overlay of the newest single tree to compare against the ensemble |
 | **Neural network (MLP)** | Classification | Epochs of backpropagation, with a weight-shaded network diagram |
 | **k-means** | Clustering | Assign and update shown as *separate* frames, with centroid movement trails |
+| **Gaussian mixture** | Clustering | EM iterations, with covariance ellipses that tilt and points faded by how strongly they belong |
 | **DBSCAN** | Clustering | The flood fill itself, with the eps radius drawn on the expanding point and core / border / noise points drawn differently |
 | **Hierarchical** | Clustering | The cut sliding down a dendrogram, merging two clusters per frame, with selectable linkage |
 
 Synthetic datasets: Gaussian blobs, stretched blobs, two moons, concentric circles, spirals, XOR
 quadrants, uniform noise, and four regression shapes (noisy line, sine wave, cubic, step). All have
-adjustable sample count, noise and seed.
+adjustable sample count and noise. **Shuffle** draws a new dataset and **Resample split** redraws the holdout without touching the data; no seed is ever shown.
 
 ## Using it
 
@@ -46,7 +47,8 @@ adjustable sample count, noise and seed.
 * **Drag** a point to move it and watch the model follow in real time.
 * **Shift-click** or **right-click** a point to delete it.
 * **Space** plays/pauses; **←** and **→** step through frames.
-* *Auto-train* re-fits on every change. Turn it off if you would rather press **Train** yourself.
+* *Auto-run* re-fits on every change. Turn it off and changes are staged until you press **Generate** for data or **Train** for the model.
+* **Validation split** holds back 0–50% of the points, scored separately, so training and validation metrics can be compared. Held-out points are ringed on the plot.
 * Pressing **Train** or **Generate** rewinds and plays the animation; tweaking a slider re-fits in
   place so you can compare two settings at the same frame.
 
@@ -98,7 +100,7 @@ python -m uvicorn backend.app.main:app --port 8000
 python -m pytest
 ```
 
-99 tests cover every algorithm endpoint, every dataset generator, the grid encoding, parameter
+170 tests cover every algorithm endpoint, every dataset generator, the grid encoding, parameter
 coercion and clamping, and the error paths (unlabelled data, a single class, too few points,
 degenerate input).
 
@@ -132,7 +134,7 @@ The models are scikit-learn. Nothing is reimplemented by hand — the animations
 scikit-learn for genuine intermediate states:
 
 * `partial_fit` for SGD regressors/classifiers and naive Bayes (one epoch or one chunk per frame)
-* `warm_start` for the random forest (one more tree per frame) and the MLP (one epoch per frame)
+* `warm_start` for the random forest (one more tree per frame), the MLP (one epoch per frame) and the Gaussian mixture (one EM iteration per frame)
 * `SVC(max_iter=n)` to cap the libsvm solver part-way through
 * refitting at each depth / k / degree for trees, k-NN and polynomials
 * an explicit Lloyd loop over `kmeans_plusplus` + `pairwise_distances_argmin` for k-means, so the
@@ -152,8 +154,9 @@ Three endpoints, all JSON:
   description and "things to try" list; **the frontend builds its entire control panel from this**,
   so adding a hyperparameter needs no frontend change.
 * `POST /api/generate` — `{generator, n_samples, noise, seed, classes}` → points.
-* `POST /api/fit` — `{algorithm, params, points, viewport, grid_resolution}` → one `step` per
-  animation frame, each with metrics, a decision surface and any algorithm-specific extras.
+* `POST /api/fit` — `{algorithm, params, points, viewport, grid_resolution, validation_split,
+  validation_seed}` → one `step` per animation frame, each with metrics, a decision surface and
+  any algorithm-specific extras.
 
 Decision surfaces are the bulky part of the payload, so each frame's grid is sent as a base64
 `uint8` array — one byte of class index per cell, plus an optional confidence byte that the

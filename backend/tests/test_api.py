@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import math
 
 import pytest
 from fastapi.testclient import TestClient
@@ -58,7 +59,7 @@ def test_health():
 
 
 def test_catalogue_shape(catalogue):
-    assert len(catalogue["algorithms"]) == 12
+    assert len(catalogue["algorithms"]) == 13
     assert {spec["task"] for spec in catalogue["algorithms"]} == {
         "regression",
         "classification",
@@ -192,6 +193,7 @@ ALGORITHM_TASKS = {
     "kmeans": "clustering",
     "dbscan": "clustering",
     "hierarchical": "clustering",
+    "gmm": "clustering",
 }
 
 # Reserved surface byte for "no cluster here"; see NOISE_CLASS in grid.py.
@@ -470,6 +472,93 @@ def test_kmeans_reseeding_changes_the_starting_centroids():
     assert first["steps"][0]["extras"]["centroids"] != second["steps"][0]["extras"]["centroids"]
     # Same seed must still reproduce, so a run can be reasoned about.
     assert fit("kmeans", points, {"init": "random", "seed": 1})["steps"] == first["steps"]
+
+
+def _blobs(n=240, classes=3, generator="anisotropic", noise=0.2, seed=2):
+    return [
+        {**p, "label": None}
+        for p in datasets.generate(generator, n_samples=n, noise=noise, seed=seed, classes=classes)
+    ]
+
+
+@pytest.mark.parametrize("covariance", ["full", "tied", "diag", "spherical"])
+def test_gmm_log_likelihood_never_falls(covariance):
+    """EM cannot decrease the log-likelihood. That is a theorem, not a hope."""
+    payload = fit("gmm", _blobs(), {"covariance_type": covariance, "max_iter": 30})
+    values = [step["metrics"]["log_likelihood"] for step in payload["steps"]]
+    assert all(b >= a - 1e-6 for a, b in zip(values, values[1:])), values
+
+
+def test_gmm_reports_soft_responsibilities():
+    payload = fit("gmm", _blobs(), {"n_components": 3})
+    for step in payload["steps"]:
+        responsibility = step["extras"]["responsibility"]
+        assert len(responsibility) == 240
+        # A max-probability can never be below 1/k or above 1.
+        assert all(1 / 3 - 1e-6 <= r <= 1.0 for r in responsibility)
+
+
+def test_only_full_and_tied_covariance_can_tilt():
+    """The covariance type is the whole lesson: it controls ellipse shape."""
+    points = _blobs()
+
+    def angles(covariance):
+        payload = fit("gmm", points, {"covariance_type": covariance})
+        return [e["angle"] for e in payload["steps"][-1]["extras"]["ellipses"]]
+
+    # Axis-aligned means every angle is a multiple of a right angle: the ellipse
+    # axes line up with x and y even when the major axis is the vertical one.
+    for covariance in ("diag", "spherical"):
+        for angle in angles(covariance):
+            assert min(abs(angle % (math.pi / 2)), math.pi / 2 - abs(angle % (math.pi / 2))) < 1e-6, (
+                f"{covariance} produced a tilted ellipse: {angle}"
+            )
+
+    # Full covariance on deliberately rotated blobs must tilt off the axes.
+    tilted = [
+        a for a in angles("full")
+        if min(abs(a % (math.pi / 2)), math.pi / 2 - abs(a % (math.pi / 2))) > 0.05
+    ]
+    assert tilted, "full covariance should tilt on the stretched-blobs dataset"
+
+
+def test_tied_covariance_shares_one_shape():
+    payload = fit("gmm", _blobs(), {"covariance_type": "tied", "n_components": 3})
+    ellipses = payload["steps"][-1]["extras"]["ellipses"]
+    radii = {(round(e["rx"], 6), round(e["ry"], 6), round(e["angle"], 6)) for e in ellipses}
+    assert len(radii) == 1, f"tied components should share a shape, got {radii}"
+
+
+def test_gmm_bic_finds_the_right_k_on_separated_blobs():
+    """Seed 9 puts the three centres far apart; BIC should then recover k = 3.
+
+    It does not do so universally. When two centres fall close together BIC
+    prefers fewer components, which is BIC being right about what the data
+    supports rather than BIC failing.
+    """
+    points = _blobs(generator="blobs", classes=3, noise=0.08, seed=9)
+    bic = {
+        k: fit("gmm", points, {"n_components": k, "covariance_type": "full"})["summary"]["BIC"]
+        for k in range(1, 7)
+    }
+    assert min(bic, key=bic.get) == 3, bic
+
+
+def test_gmm_bic_charges_for_unused_components():
+    points = _blobs(generator="blobs", classes=3, noise=0.08, seed=9)
+    bic = {
+        k: fit("gmm", points, {"n_components": k, "covariance_type": "full"})["summary"]["BIC"]
+        for k in (3, 10)
+    }
+    assert bic[10] > bic[3], f"ten components should cost more than three: {bic}"
+
+
+def test_gmm_offers_a_reseed_button():
+    catalogue = client.get("/api/algorithms").json()
+    spec = next(s for s in catalogue["algorithms"] if s["id"] == "gmm")
+    assert spec["task"] == "clustering"
+    assert spec["reseed"]["param"] == "seed"
+    assert next(p for p in spec["params"] if p["name"] == "seed")["hidden"] is True
 
 
 def test_kmeans_inertia_never_increases():

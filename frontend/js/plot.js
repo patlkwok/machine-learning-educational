@@ -473,7 +473,10 @@ export class Plot {
         this.toScreenY(ellipse.cy),
         Math.max(ellipse.rx * scaleX, 1),
         Math.max(ellipse.ry * scaleY, 1),
-        0,
+        // Negated because screen y grows downwards, so a world-space rotation
+        // appears mirrored on the canvas. Naive Bayes sends no angle and stays
+        // axis-aligned; a full-covariance mixture tilts.
+        -(ellipse.angle || 0),
         0,
         Math.PI * 2
       );
@@ -512,6 +515,14 @@ export class Plot {
     const ctx = this.ctx;
     const assignments = step?.extras?.assignments || null;
     const roles = step?.extras?.roles || null;
+    // Soft clustering: how strongly each point belongs to its best component.
+    // The floor is 1/k, not 1/2 — with k components a point torn equally between
+    // all of them still scores 1/k, so the fade has to be normalised by k or
+    // large mixtures render their most uncertain points invisible.
+    const responsibility = step?.extras?.responsibility || null;
+    const components = Math.max(step?.extras?.n_clusters || 2, 2);
+    const floor = 1 / components;
+    const opacity = (r) => 0.25 + 0.75 * Math.min(Math.max((r - floor) / (1 - floor), 0), 1);
     const supportSet = new Set(step?.extras?.support_indices || []);
 
     this.points.forEach((point, index) => {
@@ -582,7 +593,9 @@ export class Plot {
 
       ctx.beginPath();
       ctx.arc(sx, sy, radius, 0, Math.PI * 2);
-      ctx.fillStyle = color;
+      // A point split between two components is drawn faded, so uncertainty is
+      // visible on the plot rather than buried in the metrics.
+      ctx.fillStyle = responsibility ? rgba(color, opacity(responsibility[index] ?? 1)) : color;
       ctx.fill();
       ctx.lineWidth = 1.4;
       ctx.strokeStyle = theme.fade(theme.colors().plotHalo, 0.9);
