@@ -844,26 +844,73 @@ def test_svm_reports_support_vectors():
     assert len(final["extras"]["margin_lines"]) == 3  # boundary plus both margins
 
 
-def test_svm_frame_budget_only_trims_on_large_datasets():
-    """Each SVM frame refits the solver, so the budget scales with dataset size."""
-    small = [
-        {**p} for p in datasets.generate("moons", n_samples=200, noise=0.2, seed=5)
-    ]
-    large = [
-        {**p} for p in datasets.generate("moons", n_samples=1000, noise=0.2, seed=5)
-    ]
+def test_svm_frame_budget_only_trims_large_multiclass_datasets():
+    """Only the one-vs-one path pays per frame, so only it has its budget trimmed."""
+    def blobs(n, classes):
+        return datasets.generate("blobs", n_samples=n, noise=0.3, seed=5, classes=classes)
 
     asked = 20
-    small_payload = fit("svm", small, {"frames": asked})
-    large_payload = fit("svm", large, {"frames": asked})
+    small = fit("svm", blobs(200, 4), {"frames": asked})
+    large = fit("svm", blobs(1000, 4), {"frames": asked})
+    binary = fit("svm", blobs(1000, 2), {"frames": asked})
 
     # Small datasets get every frame they asked for, and say nothing about it.
-    assert not any("requested frames" in note for note in small_payload["notes"])
-    # Large ones are trimmed, and say so rather than silently disagreeing.
-    assert len(large_payload["steps"]) < len(small_payload["steps"])
-    assert any("requested frames" in note for note in large_payload["notes"])
+    assert not any("requested frames" in note for note in small["notes"])
+    # Large multiclass ones are trimmed, and say so rather than silently disagreeing.
+    assert len(large["steps"]) < len(small["steps"])
+    assert any("requested frames" in note for note in large["notes"])
     # Never trimmed so far that the animation stops being an animation.
-    assert len(large_payload["steps"]) >= 6
+    assert len(large["steps"]) >= 6
+    # The same size with two classes is cached, so it is not trimmed at all.
+    assert not any("requested frames" in note for note in binary["notes"])
+    assert len(binary["steps"]) > len(large["steps"])
+
+
+@pytest.mark.parametrize("kernel", ["linear", "rbf", "poly"])
+def test_svm_cached_decision_matches_sklearn(kernel):
+    """The kernel cache is a rewrite of decision_function, not an approximation.
+
+    The trap this guards is `coef0`: SVC defaults it to 0.0 while
+    polynomial_kernel defaults it to 1. Getting it wrong fails silently and
+    moves the decision function by ~200, so the float32 tolerance below still
+    catches it by six orders of magnitude.
+    """
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.svm import SVC
+
+    from app.algorithms.svm import _decision, _kernel_matrix, _labels_from
+
+    points = datasets.generate("moons", n_samples=300, noise=0.2, seed=3)
+    X = np.array([[p["x"], p["y"]] for p in points])
+    y = np.array([p["label"] for p in points])
+    Xs = StandardScaler().fit_transform(X)
+    grid = np.random.default_rng(0).uniform(-3, 3, size=(500, 2))
+
+    model = SVC(kernel=kernel, C=1.0, gamma=0.5, degree=3).fit(Xs, y)
+    K = _kernel_matrix(grid, Xs, kernel, gamma=0.5, degree=3)
+    assert K.dtype == np.float32  # the memory budget the tolerance pays for
+
+    expected = model.decision_function(grid)
+    cached = _decision(K, model, len(y))
+    assert cached == pytest.approx(expected, abs=1e-4)
+    # Labels can only disagree for a point sitting on the boundary to within
+    # float32 noise, which is far finer than one grid cell.
+    clear = np.abs(expected) > 1e-3
+    assert (_labels_from(cached, model)[clear] == model.predict(grid)[clear]).all()
+
+
+def test_svm_multiclass_falls_back_to_the_model():
+    """Above two classes the cached formula does not apply; the frames must still be right."""
+    points = datasets.generate("blobs", n_samples=200, noise=0.25, seed=4, classes=4)
+    payload = fit("svm", points, {"kernel": "rbf", "frames": 6})
+
+    final = payload["steps"][-1]
+    assert final["surface"]["n_classes"] == 4
+    assert final["metrics"]["train_accuracy"] > 0.8
+    # Hinge loss is only defined for the binary case.
+    assert final["metrics"]["hinge_loss"] is None
+    surface = np.frombuffer(base64.b64decode(final["surface"]["classes"]), dtype=np.uint8)
+    assert len(np.unique(surface)) > 2
 
 
 def test_generator_supports_the_full_point_range():
