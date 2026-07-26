@@ -330,7 +330,9 @@ function renderGeneratorControls() {
       min: 0,
       max: 1,
       step: 0.01,
-      help: '',
+      // What this dial means depends on the dataset, so each one describes its
+      // own rather than the control claiming a single meaning for all of them.
+      help: spec ? spec.noise_help : '',
     },
     // No seed control. Everything here is seeded and reproducible either way,
     // so showing the number buys nothing a learner can use: "Shuffle" and

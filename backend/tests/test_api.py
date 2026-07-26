@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import math
 
+import numpy as np
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -163,6 +165,93 @@ def test_every_generator(generator):
         labels = {p["label"] for p in points}
         assert None not in labels
         assert len(labels) >= 2
+
+
+# ------------------------------------------------------------ the noise dial --
+
+# Built from Gaussian clusters: zero spread would collapse each cluster to a
+# single coordinate, so these keep a documented floor. Everything else reaches
+# a genuinely clean zero.
+FLOORED = {"blobs", "anisotropic", "xor"}
+
+TRUE_CURVE = {
+    "linear_regression": None,  # slope and intercept are drawn at random
+    "wave_regression": lambda x: 2.6 * np.sin(x * 0.9),
+    "cubic_regression": lambda x: 0.09 * x**3 - 0.45 * x,
+    "step_regression": lambda x: np.where(x < -1.5, -2.5, np.where(x < 1.5, 0.5, 3.0)),
+}
+
+
+@pytest.mark.parametrize("generator", [g for g in TRUE_CURVE if TRUE_CURVE[g]])
+def test_regression_noise_zero_puts_points_exactly_on_the_curve(generator):
+    points = datasets.generate(generator, n_samples=120, noise=0.0, seed=5)
+    x = np.array([p["x"] for p in points])
+    y = np.array([p["y"] for p in points])
+    # generate() clamps every point into the visible plot, and the cubic runs
+    # past it near the edges, so compare against the clamped curve.
+    limit = datasets.PLOT_RADIUS - 0.15
+    expected = np.clip(TRUE_CURVE[generator](x), -limit, limit)
+    assert np.allclose(y, expected, atol=1e-9), "noise 0 must mean no noise"
+
+
+def test_linear_regression_noise_zero_is_exactly_a_straight_line():
+    points = datasets.generate("linear_regression", n_samples=120, noise=0.0, seed=5)
+    x = np.array([p["x"] for p in points])
+    y = np.array([p["y"] for p in points])
+    residual = y - np.polyval(np.polyfit(x, y, 1), x)
+    assert np.abs(residual).max() < 1e-9, "noise 0 must mean no noise"
+
+
+@pytest.mark.parametrize("generator", ["moons", "circles", "spirals"])
+def test_shaped_generators_reach_a_clean_zero(generator):
+    """At noise 0 the shape is exact, so every point sits on a thin curve.
+
+    Measured as the distance to the nearest other point: on a clean curve the
+    points are strung along it, whereas jitter pushes them off in all directions.
+    """
+    def nearest_neighbour_spread(noise):
+        points = datasets.generate(generator, n_samples=300, noise=noise, seed=5)
+        xy = np.array([[p["x"], p["y"]] for p in points])
+        distances = np.linalg.norm(xy[:, None, :] - xy[None, :, :], axis=-1)
+        np.fill_diagonal(distances, np.inf)
+        return float(distances.min(axis=1).mean())
+
+    clean = nearest_neighbour_spread(0.0)
+    noisy = nearest_neighbour_spread(0.6)
+    assert clean < noisy, f"{generator}: noise 0 ({clean:.4f}) should be tighter than 0.6 ({noisy:.4f})"
+
+
+@pytest.mark.parametrize("generator", sorted(FLOORED))
+def test_cluster_generators_keep_their_documented_floor(generator):
+    points = datasets.generate(generator, n_samples=240, noise=0.0, seed=5, classes=3)
+    xy = np.array([[p["x"], p["y"]] for p in points])
+    labels = np.array([p["label"] for p in points])
+    spread = np.mean([
+        np.linalg.norm(xy[labels == c] - xy[labels == c].mean(axis=0), axis=1).mean()
+        for c in np.unique(labels)
+    ])
+    assert spread > 0.1, "a floored generator must not collapse to points"
+    assert "0 gives" in datasets.GENERATORS[generator].noise_help, "the floor must be documented"
+
+
+def test_uniform_noise_dial_does_something():
+    """It used to be read and discarded, so the control was dead."""
+    def coords(noise):
+        points = datasets.generate("uniform", n_samples=256, noise=noise, seed=5, classes=2)
+        return np.array([[p["x"], p["y"]] for p in points])
+
+    lattice = coords(0.0)
+    assert np.linalg.norm(coords(1.0) - lattice, axis=1).mean() > 0.2
+
+    # At zero it is an exact grid: far fewer distinct coordinates than points.
+    assert len(np.unique(np.round(lattice[:, 0], 6))) <= 16 + 1
+
+
+def test_every_generator_explains_its_noise_dial():
+    catalogue = client.get("/api/algorithms").json()
+    for generator in catalogue["generators"]:
+        assert generator["noise_help"], f"{generator['id']} has no noise help"
+        assert len(generator["noise_help"]) > 30
 
 
 def test_generator_is_deterministic():

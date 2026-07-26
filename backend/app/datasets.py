@@ -16,6 +16,12 @@ from sklearn.datasets import make_blobs, make_circles, make_moons
 
 PLOT_RADIUS = 5.0
 
+# Generators built from Gaussian clusters cannot honour a noise of zero: at zero
+# spread every member of a cluster lands on the same coordinate, which is not a
+# dataset. They keep this floor, and their noise_help says so. Every other
+# generator reaches a genuinely clean zero.
+CLUSTER_FLOOR = 0.4
+
 MIN_SAMPLES = 4
 MAX_SAMPLES = 1200
 
@@ -35,7 +41,7 @@ def _blobs(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.nd
     xy, labels = make_blobs(
         n_samples=n_samples,
         centers=classes,
-        cluster_std=0.4 + 2.2 * noise,
+        cluster_std=CLUSTER_FLOOR + 2.2 * noise,
         center_box=(-4.0, 4.0),
         random_state=seed,
     )
@@ -46,7 +52,7 @@ def _anisotropic(n_samples: int, noise: float, seed: int, classes: int) -> tuple
     xy, labels = make_blobs(
         n_samples=n_samples,
         centers=classes,
-        cluster_std=0.4 + 1.6 * noise,
+        cluster_std=CLUSTER_FLOOR + 1.6 * noise,
         center_box=(-4.0, 4.0),
         random_state=seed,
     )
@@ -60,14 +66,14 @@ def _anisotropic(n_samples: int, noise: float, seed: int, classes: int) -> tuple
 
 
 def _moons(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.ndarray, np.ndarray]:
-    xy, labels = make_moons(n_samples=n_samples, noise=0.02 + 0.28 * noise, random_state=seed)
+    xy, labels = make_moons(n_samples=n_samples, noise=0.32 * noise, random_state=seed)
     return _rescale(xy), labels
 
 
 def _circles(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.ndarray, np.ndarray]:
     xy, labels = make_circles(
         n_samples=n_samples,
-        noise=0.02 + 0.18 * noise,
+        noise=0.2 * noise,
         factor=0.45,
         random_state=seed,
     )
@@ -82,7 +88,7 @@ def _spirals(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.
         t = np.sqrt(rng.uniform(0.06, 1.0, per_arm)) * 2.6 * np.pi
         offset = 2.0 * np.pi * arm / classes
         radius = t * 0.55
-        jitter = rng.normal(scale=0.06 + 0.7 * noise, size=(per_arm, 2))
+        jitter = rng.normal(scale=0.75 * noise, size=(per_arm, 2))
         xs.append(radius * np.cos(t + offset) + jitter[:, 0])
         ys.append(radius * np.sin(t + offset) + jitter[:, 1])
         labels.append(np.full(per_arm, arm))
@@ -97,21 +103,28 @@ def _xor(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.ndar
     quadrant_class = [0, 1, 1, 0]
     xs, labels = [], []
     for (cx, cy), cls in zip(centres, quadrant_class):
-        pts = rng.normal(loc=(cx, cy), scale=0.35 + 1.1 * noise, size=(per_quadrant, 2))
+        pts = rng.normal(loc=(cx, cy), scale=CLUSTER_FLOOR + 1.1 * noise, size=(per_quadrant, 2))
         xs.append(pts)
         labels.append(np.full(per_quadrant, cls))
     return _rescale(np.vstack(xs)), np.concatenate(labels)
 
 
 def _uniform(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.ndarray, np.ndarray]:
-    """Uniform positions with random labels: structure-free by construction.
+    """Structure-free by construction, from a lattice to fully random.
 
-    For clustering it shows what k-means does when there are no clusters; for
-    classification the labels carry no signal at all, so any training accuracy
-    above chance is pure memorisation.
+    Noise is how far each point strays from a regular grid: zero gives an exact
+    lattice, one gives uniform randomness. Neither end contains clusters, so the
+    lesson holds throughout — for clustering it shows what k-means does when
+    there are none, and for classification the labels carry no signal at all, so
+    any training accuracy above chance is pure memorisation.
     """
     rng = np.random.default_rng(seed)
-    xy = rng.uniform(-4.4, 4.4, size=(n_samples, 2))
+    side = int(np.ceil(np.sqrt(n_samples)))
+    axis = np.linspace(-4.4, 4.4, side)
+    lattice = np.column_stack([g.ravel() for g in np.meshgrid(axis, axis)])[:n_samples]
+    # At noise = 1 the jitter matches the grid spacing, which erases the lattice.
+    spacing = (axis[-1] - axis[0]) / max(side - 1, 1)
+    xy = lattice + rng.normal(scale=noise * spacing, size=lattice.shape)
     labels = rng.integers(0, classes, size=n_samples)
     # Guarantee every class shows up even in tiny samples.
     for cls in range(min(classes, n_samples)):
@@ -129,21 +142,21 @@ def _linear_regression(n_samples: int, noise: float, seed: int, classes: int) ->
     x = _regression_x(n_samples, seed)
     slope = rng.uniform(-1.1, 1.1)
     intercept = rng.uniform(-1.2, 1.2)
-    y = slope * x + intercept + rng.normal(scale=0.15 + 2.4 * noise, size=n_samples)
+    y = slope * x + intercept + rng.normal(scale=2.5 * noise, size=n_samples)
     return np.column_stack([x, y]), None
 
 
 def _wave_regression(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.ndarray, None]:
     rng = np.random.default_rng(seed + 2)
     x = _regression_x(n_samples, seed)
-    y = 2.6 * np.sin(x * 0.9) + rng.normal(scale=0.1 + 1.8 * noise, size=n_samples)
+    y = 2.6 * np.sin(x * 0.9) + rng.normal(scale=1.9 * noise, size=n_samples)
     return np.column_stack([x, y]), None
 
 
 def _cubic_regression(n_samples: int, noise: float, seed: int, classes: int) -> tuple[np.ndarray, None]:
     rng = np.random.default_rng(seed + 3)
     x = _regression_x(n_samples, seed)
-    y = 0.09 * x**3 - 0.45 * x + rng.normal(scale=0.1 + 1.8 * noise, size=n_samples)
+    y = 0.09 * x**3 - 0.45 * x + rng.normal(scale=1.9 * noise, size=n_samples)
     return np.column_stack([x, y]), None
 
 
@@ -151,7 +164,7 @@ def _step_regression(n_samples: int, noise: float, seed: int, classes: int) -> t
     rng = np.random.default_rng(seed + 4)
     x = _regression_x(n_samples, seed)
     y = np.where(x < -1.5, -2.5, np.where(x < 1.5, 0.5, 3.0))
-    y = y + rng.normal(scale=0.1 + 1.4 * noise, size=n_samples)
+    y = y + rng.normal(scale=1.5 * noise, size=n_samples)
     return np.column_stack([x, y]), None
 
 
@@ -162,6 +175,7 @@ class GeneratorSpec:
     kind: str  # "labelled" (classification / clustering) or "regression"
     description: str
     fn: Callable[[int, float, int, int], tuple[np.ndarray, np.ndarray | None]] = field(repr=False)
+    noise_help: str = ""
     min_classes: int = 2
     max_classes: int = 2
 
@@ -175,6 +189,7 @@ class GeneratorSpec:
             "name": self.name,
             "kind": self.kind,
             "description": self.description,
+            "noise_help": self.noise_help,
             "supports_classes": self.supports_classes,
             "min_classes": self.min_classes,
             "max_classes": self.max_classes,
@@ -190,6 +205,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="labelled",
             description="Round, well-separated clusters. The easy case that almost every algorithm gets right.",
             fn=_blobs,
+            noise_help=(
+                "Cluster spread. A Gaussian cluster of zero width is a single point, so 0 gives the tightest sensible clusters rather than none."
+            ),
             min_classes=2,
             max_classes=6,
         ),
@@ -199,6 +217,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="labelled",
             description="Elongated, rotated clusters. k-means struggles here because it assumes round clusters.",
             fn=_anisotropic,
+            noise_help=(
+                "Cluster spread. A Gaussian cluster of zero width is a single point, so 0 gives the tightest sensible clusters rather than none."
+            ),
             min_classes=2,
             max_classes=5,
         ),
@@ -208,6 +229,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="labelled",
             description="Interleaving crescents. Not linearly separable, so linear models top out around 85%.",
             fn=_moons,
+            noise_help=(
+                "How far points stray from the two exact crescents. At 0 they lie on them precisely."
+            ),
         ),
         GeneratorSpec(
             id="circles",
@@ -215,6 +239,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="labelled",
             description="A ring inside a ring. Needs a kernel or a non-linear model to separate at all.",
             fn=_circles,
+            noise_help=(
+                "How far points stray from the two exact rings. At 0 they lie on them precisely."
+            ),
         ),
         GeneratorSpec(
             id="spirals",
@@ -222,6 +249,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="labelled",
             description="Intertwined arms. The hardest built-in set: only flexible models untangle it.",
             fn=_spirals,
+            noise_help=(
+                "How far points stray from the exact spiral arms. At 0 they lie on them precisely."
+            ),
             min_classes=2,
             max_classes=4,
         ),
@@ -231,6 +261,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="labelled",
             description="Diagonally opposite quadrants share a class. The classic example a single line cannot solve.",
             fn=_xor,
+            noise_help=(
+                "Cluster spread. A Gaussian cluster of zero width is a single point, so 0 gives the tightest sensible clusters rather than none."
+            ),
         ),
         GeneratorSpec(
             id="uniform",
@@ -238,6 +271,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="labelled",
             description="No structure at all: random positions, random labels. Shows what clustering does when there are no clusters, and what a classifier does when there is nothing to learn.",
             fn=_uniform,
+            noise_help=(
+                "How far points stray from a regular grid. At 0 they form an exact lattice; at 1 they are fully random. Neither end has clusters."
+            ),
             min_classes=2,
             max_classes=6,
         ),
@@ -247,6 +283,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="regression",
             description="A straight relationship plus noise. Linear regression is the right tool.",
             fn=_linear_regression,
+            noise_help=(
+                "Spread of the points around the true line. At 0 they sit exactly on it."
+            ),
         ),
         GeneratorSpec(
             id="wave_regression",
@@ -254,6 +293,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="regression",
             description="A smooth curve. A straight line underfits badly; polynomial degree 5+ tracks it.",
             fn=_wave_regression,
+            noise_help=(
+                "Spread of the points around the true curve. At 0 they sit exactly on it."
+            ),
         ),
         GeneratorSpec(
             id="cubic_regression",
@@ -261,6 +303,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="regression",
             description="An S-shaped trend. Degree 3 fits it exactly; higher degrees start chasing noise.",
             fn=_cubic_regression,
+            noise_help=(
+                "Spread of the points around the true curve. At 0 they sit exactly on it."
+            ),
         ),
         GeneratorSpec(
             id="step_regression",
@@ -268,6 +313,9 @@ GENERATORS: dict[str, GeneratorSpec] = {
             kind="regression",
             description="Sharp jumps. No polynomial fits this cleanly, which is the point.",
             fn=_step_regression,
+            noise_help=(
+                "Spread of the points around the true steps. At 0 they sit exactly on them."
+            ),
         ),
     ]
 }

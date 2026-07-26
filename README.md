@@ -38,7 +38,14 @@ neurons each over 1000 points — trains and renders every frame in about a seco
 
 Synthetic datasets: Gaussian blobs, stretched blobs, two moons, concentric circles, spirals, XOR
 quadrants, uniform noise, and four regression shapes (noisy line, sine wave, cubic, step). All have
-adjustable sample count and noise. **Shuffle** draws a new dataset and **Resample split** redraws the holdout without touching the data; no seed is ever shown.
+adjustable sample count and noise. **Shuffle** draws a new dataset and **Resample split** redraws the
+holdout without touching the data; no seed is ever shown.
+
+The **Noise** dial means something slightly different per dataset — cluster spread for the blob sets,
+positional jitter for the shaped ones, residual spread for regression — so each dataset explains its
+own in the control's help text. Noise 0 is genuinely zero everywhere except the three generators
+built from Gaussian clusters (blobs, stretched blobs, XOR), where zero width would collapse each
+cluster to a single point; those keep a documented floor.
 
 ## Using it
 
