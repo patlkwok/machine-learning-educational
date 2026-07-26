@@ -299,10 +299,22 @@ export class Plot {
     ctx.restore();
   }
 
+  /**
+   * The original class labels, in the order the backend encoded them.
+   *
+   * Models are fitted on contiguous labels 0..k-1, but points are drawn with
+   * the label the user actually chose. Without this mapping, picking classes 1
+   * and 3 paints the regions in the colours of classes 0 and 1.
+   */
+  _classValues() {
+    return this.step?.extras?.class_values || this.result?.extras?.class_values || null;
+  }
+
   _buildSurface(surface) {
     const classes = decodeBytes(surface.classes);
     const confidence = surface.confidence ? decodeBytes(surface.confidence) : null;
     const resolution = this.result.grid.resolution;
+    const values = this._classValues();
 
     const offscreen = document.createElement('canvas');
     offscreen.width = resolution;
@@ -317,7 +329,9 @@ export class Plot {
         const source = flipped * resolution + col;
         const target = (row * resolution + col) * 4;
         const cell = classes[source];
-        const [r, g, b] = classRgb(cell);
+        // NOISE_CLASS is a reserved marker, not an index into the label list.
+        const shade = values && cell !== NOISE_CLASS ? values[cell] ?? cell : cell;
+        const [r, g, b] = classRgb(shade);
         const sureness = confidence ? confidence[source] / 255 : 1;
         data[target] = r;
         data[target + 1] = g;
@@ -466,7 +480,9 @@ export class Plot {
     ctx.setLineDash([5, 4]);
     ctx.lineWidth = 1.6;
     ellipses.forEach((ellipse) => {
-      ctx.strokeStyle = rgba(classColor(ellipse.class_index), 0.9);
+      // class_value is the user's own label; class_index is the fitted 0..k-1
+      // position. Naive Bayes sends both, a mixture model only the latter.
+      ctx.strokeStyle = rgba(classColor(ellipse.class_value ?? ellipse.class_index), 0.9);
       ctx.beginPath();
       ctx.ellipse(
         this.toScreenX(ellipse.cx),

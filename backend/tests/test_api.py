@@ -657,6 +657,48 @@ def test_kmeans_inertia_never_increases():
     assert all(step["extras"]["centroids"] for step in payload["steps"])
 
 
+SPARSE_LABELS = [
+    {"x": float(x), "y": float(y), "label": label}
+    for label, (cx, cy) in ((1, (-2.0, -2.0)), (3, (2.0, 2.0)))
+    for x, y in np.random.default_rng(label).normal((cx, cy), 0.7, size=(40, 2))
+]
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [a for a, t in ALGORITHM_TASKS.items() if t == "classification"],
+)
+def test_classifiers_report_the_original_labels(algorithm):
+    """The frontend colours regions by mapping surface bytes back through this.
+
+    Models are fitted on contiguous labels, so a user who picks classes 1 and 3
+    gets a surface encoded as 0 and 1. Without class_values the plot would paint
+    those regions in the colours of classes 0 and 1 while the points wore 1 and 3.
+    """
+    payload = fit(algorithm, SPARSE_LABELS)
+    step = payload["steps"][-1]
+    values = step["extras"].get("class_values") or payload["extras"].get("class_values")
+
+    assert values == [1, 3], f"{algorithm} lost the original labels: {values}"
+
+    # The surface really is encoded in fitted space, which is what makes the
+    # mapping necessary rather than merely tidy.
+    encoded = set(base64.b64decode(step["surface"]["classes"])) - {NOISE_CLASS}
+    assert encoded <= {0, 1}, f"expected fitted indices, got {sorted(encoded)}"
+
+
+def test_decision_tree_leaves_carry_the_original_label():
+    payload = fit("decision_tree", SPARSE_LABELS)
+    tree = payload["steps"][-1]["extras"]["tree"]
+
+    def leaves(node):
+        if node["is_leaf"]:
+            return [node["predicted_class"]]
+        return leaves(node["left"]) + leaves(node["right"])
+
+    assert set(leaves(tree)) <= {1, 3}, "leaves must predict the user's own labels"
+
+
 def _moons(n=200, noise=0.1):
     return [
         {**p, "label": None}

@@ -101,9 +101,10 @@ export function renderTree(container, tree, classValues) {
     const { node } = box;
     const y = yOf(box.depth);
     const isLeaf = node.is_leaf || box.truncated;
-    const fill = isLeaf
-      ? hexToRgba(classColor(node.predicted_index), 0.28)
-      : theme.colors().diagramNodeBg;
+    // Colour by the user's own label, not the fitted 0..k-1 index, so a leaf
+    // matches the points it predicts even when some classes were never used.
+    const shade = classValues?.[node.predicted_index] ?? node.predicted_index;
+    const fill = isLeaf ? hexToRgba(classColor(shade), 0.28) : theme.colors().diagramNodeBg;
 
     svg.appendChild(
       el('rect', {
@@ -113,7 +114,7 @@ export function renderTree(container, tree, classValues) {
         height: NODE_HEIGHT,
         rx: 6,
         fill,
-        stroke: isLeaf ? classColor(node.predicted_index) : theme.fade(theme.colors().textMuted, 0.4),
+        stroke: isLeaf ? classColor(shade) : theme.fade(theme.colors().textMuted, 0.4),
         'stroke-width': 1.2,
       })
     );
