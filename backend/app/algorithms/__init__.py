@@ -1,7 +1,9 @@
 """Algorithm implementations, one module per algorithm."""
 
 from . import (  # noqa: F401
+    dbscan,
     decision_tree,
+    hierarchical,
     kmeans,
     knn,
     linear_regression,
@@ -24,6 +26,8 @@ MODULES = [
     random_forest,
     mlp,
     kmeans,
+    dbscan,
+    hierarchical,
 ]
 
 __all__ = ["MODULES"]

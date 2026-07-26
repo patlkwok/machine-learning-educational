@@ -3,11 +3,15 @@
 import { api } from './api.js';
 import { MetricChart, formatValue, escapeHtml } from './chart.js';
 import { buildClassPicker, buildOverlayToggles, buildParamControls } from './controls.js';
-import { renderNetwork, renderTree } from './diagrams.js';
+import { renderDendrogram, renderNetwork, renderTree } from './diagrams.js';
 import { Plot } from './plot.js';
 import { classColor } from './palette.js';
+import * as theme from './theme.js';
 
 const VIEWPORT = { x_min: -5, x_max: 5, y_min: -5, y_max: 5 };
+
+// Upper bound of the dataset seed control. Shuffle must not exceed it.
+const SEED_MAX = 999;
 
 const DEFAULT_GENERATOR = {
   regression: 'linear_regression',
@@ -49,6 +53,7 @@ const dom = {
   diagram: document.getElementById('diagram'),
   statusPill: document.getElementById('status-pill'),
   helpToggle: document.getElementById('help-toggle'),
+  themeToggle: document.getElementById('theme-toggle'),
   helpDialog: document.getElementById('help-dialog'),
   metricChart: document.getElementById('metric-chart'),
   metricLegend: document.getElementById('metric-legend'),
@@ -70,6 +75,8 @@ const state = {
   inFlight: false,
   queued: false,
   overlays: {},
+  // 'data' | 'model' | false - a change staged while auto-run is off.
+  stale: false,
 };
 
 const plot = new Plot(document.getElementById('plot'), {
@@ -81,6 +88,7 @@ const chart = new MetricChart(dom.metricChart, dom.metricLegend);
 /* ------------------------------------------------------------- boot --- */
 
 async function boot() {
+  applyTheme(theme.initial());
   setStatus('busy', 'Loading…');
   try {
     state.catalogue = await api.catalogue();
@@ -97,7 +105,9 @@ async function boot() {
 function bindGlobalControls() {
   dom.generateBtn.addEventListener('click', () => generateData({ mode: 'play' }));
   dom.reseedBtn.addEventListener('click', () => {
-    state.generatorOptions.seed = Math.floor(Math.random() * 100000);
+    // Must stay inside the seed control's own range, or it is clamped on the
+    // way into the slider and every "shuffle" lands on the maximum.
+    state.generatorOptions.seed = Math.floor(Math.random() * (SEED_MAX + 1));
     renderGeneratorControls();
     generateData({ mode: 'play' });
   });
@@ -110,9 +120,21 @@ function bindGlobalControls() {
   dom.generatorSelect.addEventListener('change', () => {
     state.generator = dom.generatorSelect.value;
     renderGeneratorControls();
-    generateData({ mode: 'play' });
+    if (autoRun()) generateData({ mode: 'play' });
+    else markStale('data');
   });
-  dom.resolutionSelect.addEventListener('change', () => train({ mode: 'keep' }));
+  dom.resolutionSelect.addEventListener('change', () => {
+    if (autoRun()) train({ mode: 'keep' });
+    else markStale('model');
+  });
+  dom.autoTrain.addEventListener('change', () => {
+    // Turning it back on should apply whatever was staged while it was off.
+    if (!autoRun() || !state.stale) return;
+    const pending = state.stale;
+    state.stale = false;
+    if (pending === 'data') generateData({ mode: 'final' });
+    else train({ mode: 'keep' });
+  });
 
   dom.playBtn.addEventListener('click', togglePlay);
   dom.prevBtn.addEventListener('click', () => {
@@ -135,6 +157,10 @@ function bindGlobalControls() {
   });
 
   dom.helpToggle.addEventListener('click', () => dom.helpDialog.showModal());
+
+  dom.themeToggle.addEventListener('click', () => {
+    applyTheme(theme.current() === 'light' ? 'dark' : 'light');
+  });
 
   document.addEventListener('keydown', (event) => {
     const tag = document.activeElement?.tagName;
@@ -199,7 +225,8 @@ async function selectAlgorithm(algorithmId, { generate } = {}) {
     values: state.params,
     onChange: (name, value) => {
       state.params[name] = value;
-      if (dom.autoTrain.checked) scheduleTrain(120);
+      if (autoRun()) scheduleTrain(120);
+      else markStale('model');
     },
   });
 
@@ -313,7 +340,8 @@ function renderGeneratorControls() {
     values: state.generatorOptions,
     onChange: (name, value) => {
       state.generatorOptions[name] = value;
-      generateData({ mode: 'final' });
+      if (autoRun()) generateData({ mode: 'final' });
+      else markStale('data');
     },
   });
 }
@@ -369,7 +397,12 @@ function handlePointsChanged({ settled }) {
   updateEmptyState();
   const labels = plot.points.map((point) => point.label).filter((label) => label !== null);
   if (labels.length) state.classCount = Math.max(state.classCount, Math.max(...labels) + 1);
-  if (!settled || !dom.autoTrain.checked) return;
+  // Mid-drag changes are not worth reacting to either way.
+  if (!settled) return;
+  if (!autoRun()) {
+    markStale('model');
+    return;
+  }
   scheduleTrain(280);
 }
 
@@ -410,6 +443,7 @@ async function train({ mode = 'keep' } = {}) {
       grid_resolution: Number(dom.resolutionSelect.value),
     });
     state.result = result;
+    state.stale = false;
     clearError();
     applyResult(result, { mode, previousStep, wasAtEnd });
     setStatus('ok', `Trained in ${Math.round(result.elapsed_ms)} ms`);
@@ -547,6 +581,18 @@ function renderDiagram(step) {
     renderTree(dom.diagram, step.extras.tree, step.extras.class_values);
     return;
   }
+  // The dendrogram is built once per fit; only the cut line moves per frame.
+  if (state.result?.extras?.dendrogram) {
+    dom.diagramBlock.hidden = false;
+    dom.diagramTitle.textContent = 'Dendrogram';
+    renderDendrogram(
+      dom.diagram,
+      state.result.extras.dendrogram,
+      step.extras?.cut_height ?? 0,
+      state.result.extras.max_height
+    );
+    return;
+  }
   if (state.algorithm === 'mlp') {
     dom.diagramBlock.hidden = false;
     dom.diagramTitle.textContent = 'Network weights';
@@ -576,6 +622,14 @@ function renderOverlayToggles(result) {
       label: 'Split lines',
       checked: state.overlays.splits !== false,
       help: 'Show where each node of the tree cuts the plane.',
+    });
+  }
+  if (step.extras?.eps) {
+    toggles.push({
+      key: 'eps',
+      label: 'eps radius',
+      checked: state.overlays.eps !== false,
+      help: "Circle the neighbourhood radius around the point being expanded.",
     });
   }
   if (step.extras?.ellipses) {
@@ -654,6 +708,33 @@ function renderClassPicker() {
 function setStatus(kind, text) {
   dom.statusPill.className = `pill pill-${kind}`;
   dom.statusPill.textContent = text;
+}
+
+/**
+ * Switch theme and repaint everything that draws its own colours.
+ *
+ * The surface cache holds bitmaps built from the palette, and canvas/SVG can
+ * neither inherit CSS variables nor be restyled after the fact, so all three
+ * renderers have to redraw rather than merely re-render.
+ */
+function applyTheme(next) {
+  theme.apply(next);
+  dom.themeToggle.textContent = next === 'light' ? 'Dark mode' : 'Light mode';
+  plot.surfaceCache.clear();
+  plot.render();
+  chart.render();
+  if (state.result) renderDiagram(state.result.steps[state.stepIndex]);
+}
+
+/** Whether changes should recompute immediately, or wait for a button. */
+function autoRun() {
+  return dom.autoTrain.checked;
+}
+
+/** Remember that a change is staged, and say which button applies it. */
+function markStale(what) {
+  state.stale = what;
+  setStatus('stale', what === 'data' ? 'Press Generate to apply' : 'Press Train to apply');
 }
 
 function showError(message) {

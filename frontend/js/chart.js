@@ -6,6 +6,8 @@
  * real numbers. The vertical rule marks the frame currently on screen.
  */
 
+import * as theme from './theme.js';
+
 const SERIES_COLORS = ['#5b9cf8', '#f5c451', '#4dd6a8', '#f28ec8'];
 const PADDING = { top: 10, right: 8, bottom: 16, left: 8 };
 
@@ -48,7 +50,7 @@ export class MetricChart {
     const usable = this.series.filter((s) => s.values.some((v) => v !== null && v !== undefined));
     if (!usable.length) {
       this.legend.innerHTML = '';
-      ctx.fillStyle = 'rgba(100, 116, 143, 0.9)';
+      ctx.fillStyle = theme.colors().textFaint;
       ctx.font = '12px system-ui, sans-serif';
       ctx.fillText('Train a model to see its metrics.', 8, this.height / 2);
       return;
@@ -60,7 +62,7 @@ export class MetricChart {
     const xAt = (index) => PADDING.left + (index / (count - 1)) * plotWidth;
 
     // Baseline + frame marker.
-    ctx.strokeStyle = 'rgba(147, 161, 187, 0.18)';
+    ctx.strokeStyle = theme.fade(theme.colors().textMuted, 0.25);
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(PADDING.left, PADDING.top + plotHeight + 0.5);
@@ -68,7 +70,7 @@ export class MetricChart {
     ctx.stroke();
 
     const markerX = xAt(Math.min(this.stepIndex, count - 1));
-    ctx.strokeStyle = 'rgba(232, 237, 247, 0.35)';
+    ctx.strokeStyle = theme.fade(theme.colors().plotInk, 0.35);
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
     ctx.moveTo(markerX, PADDING.top);
@@ -113,7 +115,7 @@ export class MetricChart {
         ctx.arc(markerX, yAt(current), 3.4, 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
-        ctx.strokeStyle = '#161d2c';
+        ctx.strokeStyle = theme.colors().chartMarkerHalo;
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }

@@ -32,6 +32,8 @@ input features, which trains in a fraction of a second.
 | **Random forest** | Classification | One more tree per frame, with an optional overlay of the newest single tree to compare against the ensemble |
 | **Neural network (MLP)** | Classification | Epochs of backpropagation, with a weight-shaded network diagram |
 | **k-means** | Clustering | Assign and update shown as *separate* frames, with centroid movement trails |
+| **DBSCAN** | Clustering | The flood fill itself, with the eps radius drawn on the expanding point and core / border / noise points drawn differently |
+| **Hierarchical** | Clustering | The cut sliding down a dendrogram, merging two clusters per frame, with selectable linkage |
 
 Synthetic datasets: Gaussian blobs, stretched blobs, two moons, concentric circles, spirals, XOR
 quadrants, uniform noise, and four regression shapes (noisy line, sine wave, cubic, step). All have
@@ -96,7 +98,7 @@ python -m uvicorn backend.app.main:app --port 8000
 python -m pytest
 ```
 
-72 tests cover every algorithm endpoint, every dataset generator, the grid encoding, parameter
+99 tests cover every algorithm endpoint, every dataset generator, the grid encoding, parameter
 coercion and clamping, and the error paths (unlabelled data, a single class, too few points,
 degenerate input).
 
@@ -135,6 +137,12 @@ scikit-learn for genuine intermediate states:
 * refitting at each depth / k / degree for trees, k-NN and polynomials
 * an explicit Lloyd loop over `kmeans_plusplus` + `pairwise_distances_argmin` for k-means, so the
   assign and update halves can be shown as separate frames
+* an explicit flood fill over `NearestNeighbors` radius queries for DBSCAN, for the same reason
+* one `scipy` linkage tree for hierarchical clustering, re-cut with `fcluster` at each frame
+
+DBSCAN and hierarchical clustering are **transductive**: they label the points they were given and
+have no `predict()` for anywhere else. Their shaded regions are therefore an extrapolation — nearest
+core point within `eps`, and nearest labelled point respectively — and each run says so in its notes.
 
 ### The API
 

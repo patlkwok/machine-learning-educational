@@ -5,6 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ML Playground — see how machine learning algorithms actually work</title>
   <link rel="stylesheet" href="css/style.css" />
+  <script>
+    // Set the theme before first paint, otherwise a light-mode user sees a
+    // flash of the dark default. Deliberately duplicates the storage key from
+    // js/theme.js: this has to run inline, before any module loads.
+    (function () {
+      try {
+        var stored = localStorage.getItem('ml-playground-theme');
+        if (stored !== 'light' && stored !== 'dark') {
+          stored = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', stored);
+      } catch (e) {
+        /* storage blocked: fall back to the CSS default */
+      }
+    })();
+  </script>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🧠</text></svg>" />
 </head>
 <body>
@@ -18,6 +34,7 @@
     </div>
     <div class="topbar-actions">
       <span id="status-pill" class="pill pill-idle">Ready</span>
+      <button id="theme-toggle" class="btn btn-ghost" type="button" title="Switch between light and dark">Theme</button>
       <button id="help-toggle" class="btn btn-ghost" type="button">How to use</button>
     </div>
   </header>
@@ -27,7 +44,7 @@
     <ol>
       <li><strong>Choose an algorithm</strong> on the left. The plot switches between regression, classification and clustering mode to match it.</li>
       <li><strong>Get some data.</strong> Either pick a generated dataset, or click straight on the plot to place your own points. In classification mode the coloured buttons above the plot choose which class you are placing.</li>
-      <li><strong>Tune the hyperparameters</strong> and press <em>Train</em>. With auto-train on, every change re-fits immediately.</li>
+      <li><strong>Tune the hyperparameters</strong> and press <em>Train</em>. With <em>Auto-run</em> on (the default) every change applies immediately; switch it off and changes are staged until you press <em>Generate</em> for data or <em>Train</em> for the model.</li>
       <li><strong>Scrub through the animation.</strong> Each frame is one real step of the algorithm — an epoch, an iteration, a level of depth — not a decorative transition.</li>
     </ol>
     <h3>Plot controls</h3>
@@ -67,9 +84,9 @@
         <div class="button-row">
           <button id="train-btn" class="btn btn-primary btn-wide" type="button">Train</button>
         </div>
-        <label class="checkbox">
+        <label class="checkbox" title="When off, changes are staged until you press Generate or Train.">
           <input type="checkbox" id="auto-train" checked />
-          <span>Auto-train on every change</span>
+          <span>Auto-run on every change</span>
         </label>
       </section>
     </aside>

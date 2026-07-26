@@ -7,7 +7,22 @@
  */
 
 import { decodeBytes } from './api.js';
-import { CURVE_COLOR, NEUTRAL, REFERENCE_COLOR, classColor, classRgb, rgba } from './palette.js';
+import * as theme from './theme.js';
+import {
+  CURVE_COLOR,
+  NEUTRAL,
+  NOISE_CLASS,
+  REFERENCE_COLOR,
+  classColor,
+  classRgb,
+  rgba,
+} from './palette.js';
+
+// Point roles reported by DBSCAN; mirrored from dbscan.py.
+const ROLE_PENDING = 0;
+const ROLE_CORE = 1;
+const ROLE_BORDER = 2;
+const ROLE_NOISE = 3;
 
 const HIT_RADIUS = 11;
 const POINT_RADIUS = 5;
@@ -224,7 +239,7 @@ export class Plot {
   render() {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.width, this.height);
-    ctx.fillStyle = '#0b0f18';
+    ctx.fillStyle = theme.colors().plotBg;
     ctx.fillRect(0, 0, this.width, this.height);
 
     const step = this.step;
@@ -257,8 +272,12 @@ export class Plot {
       }
     }
 
+    if (step) this._drawMergeLink(step);
     this._drawPoints(step);
-    if (step) this._drawCentroids(step);
+    if (step) {
+      this._drawEpsCircle(step);
+      this._drawCentroids(step);
+    }
   }
 
   _drawSurface(surface, cacheKey, alpha, smooth = true) {
@@ -293,12 +312,15 @@ export class Plot {
       for (let col = 0; col < resolution; col += 1) {
         const source = flipped * resolution + col;
         const target = (row * resolution + col) * 4;
-        const [r, g, b] = classRgb(classes[source]);
+        const cell = classes[source];
+        const [r, g, b] = classRgb(cell);
         const sureness = confidence ? confidence[source] / 255 : 1;
         data[target] = r;
         data[target + 1] = g;
         data[target + 2] = b;
-        data[target + 3] = Math.round(255 * (0.3 + 0.7 * sureness));
+        // Unclustered regions stay nearly transparent so they read as absence
+        // of a cluster rather than as a cluster of their own.
+        data[target + 3] = cell === NOISE_CLASS ? 34 : Math.round(255 * (0.3 + 0.7 * sureness));
       }
     }
     offscreen.getContext('2d').putImageData(image, 0, 0);
@@ -312,12 +334,12 @@ export class Plot {
     ctx.save();
     ctx.lineWidth = 1;
     ctx.font = '10px ui-monospace, monospace';
-    ctx.fillStyle = 'rgba(147, 161, 187, 0.55)';
+    ctx.fillStyle = theme.colors().plotLabel;
 
     for (let x = Math.ceil(x_min); x <= x_max; x += 1) {
       const sx = Math.round(this.toScreenX(x)) + 0.5;
       const axis = x === 0;
-      ctx.strokeStyle = axis ? 'rgba(147, 161, 187, 0.34)' : 'rgba(147, 161, 187, 0.11)';
+      ctx.strokeStyle = axis ? theme.colors().plotAxis : theme.colors().plotGrid;
       ctx.beginPath();
       ctx.moveTo(sx, 0);
       ctx.lineTo(sx, this.height);
@@ -328,7 +350,7 @@ export class Plot {
     for (let y = Math.ceil(y_min); y <= y_max; y += 1) {
       const sy = Math.round(this.toScreenY(y)) + 0.5;
       const axis = y === 0;
-      ctx.strokeStyle = axis ? 'rgba(147, 161, 187, 0.34)' : 'rgba(147, 161, 187, 0.11)';
+      ctx.strokeStyle = axis ? theme.colors().plotAxis : theme.colors().plotGrid;
       ctx.beginPath();
       ctx.moveTo(0, sy);
       ctx.lineTo(this.width, sy);
@@ -340,7 +362,7 @@ export class Plot {
       this.task === 'regression'
         ? { x: 'feature x →', y: '↑ target y' }
         : { x: 'feature x₁ →', y: '↑ feature x₂' };
-    ctx.fillStyle = 'rgba(147, 161, 187, 0.75)';
+    ctx.fillStyle = theme.colors().plotLabel;
     ctx.font = '11px ui-monospace, monospace';
     ctx.fillText(labels.x, this.width - 82, this.height - 20);
     ctx.fillText(labels.y, 10, 18);
@@ -403,7 +425,7 @@ export class Plot {
     const ctx = this.ctx;
     ctx.save();
     lines.forEach(({ depth, points }) => {
-      ctx.strokeStyle = `rgba(232, 237, 247, ${Math.max(0.18, 0.75 - depth * 0.11)})`;
+      ctx.strokeStyle = theme.fade(theme.colors().plotInk, Math.max(0.18, 0.75 - depth * 0.11));
       ctx.lineWidth = Math.max(0.7, 2.1 - depth * 0.22);
       ctx.beginPath();
       ctx.moveTo(this.toScreenX(points[0][0]), this.toScreenY(points[0][1]));
@@ -419,7 +441,7 @@ export class Plot {
     const ctx = this.ctx;
     ctx.save();
     lines.forEach(({ kind, points }) => {
-      ctx.strokeStyle = kind === 'boundary' ? 'rgba(232, 237, 247, 0.9)' : 'rgba(232, 237, 247, 0.45)';
+      ctx.strokeStyle = theme.fade(theme.colors().plotInk, kind === 'boundary' ? 0.9 : 0.45);
       ctx.lineWidth = kind === 'boundary' ? 2 : 1.2;
       ctx.setLineDash(kind === 'boundary' ? [] : [7, 5]);
       ctx.beginPath();
@@ -485,33 +507,114 @@ export class Plot {
   _drawPoints(step) {
     const ctx = this.ctx;
     const assignments = step?.extras?.assignments || null;
+    const roles = step?.extras?.roles || null;
     const supportSet = new Set(step?.extras?.support_indices || []);
 
     this.points.forEach((point, index) => {
       const sx = this.toScreenX(point.x);
       const sy = this.toScreenY(point.y);
+      const radius = index === this.hoverIndex ? POINT_RADIUS + 1.5 : POINT_RADIUS;
 
       let color = NEUTRAL;
       if (assignments && assignments[index] !== undefined) color = classColor(assignments[index]);
       else if (point.label !== null && point.label !== undefined) color = classColor(point.label);
-      else if (this.task === 'regression') color = '#cfd9ea';
+      else if (this.task === 'regression') color = theme.colors().text;
 
       if (supportSet.has(index)) {
         ctx.beginPath();
         ctx.arc(sx, sy, POINT_RADIUS + 4.5, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.strokeStyle = theme.fade(theme.colors().plotInk, 0.85);
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
 
+      // DBSCAN distinguishes three kinds of point, and the whole algorithm is
+      // easier to grasp if they look different rather than merely coloured.
+      const role = roles ? roles[index] : null;
+
+      if (role === ROLE_NOISE) {
+        const arm = radius * 0.8;
+        ctx.strokeStyle = rgba(NEUTRAL, 0.75);
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(sx - arm, sy - arm);
+        ctx.lineTo(sx + arm, sy + arm);
+        ctx.moveTo(sx + arm, sy - arm);
+        ctx.lineTo(sx - arm, sy + arm);
+        ctx.stroke();
+        return;
+      }
+
+      if (role === ROLE_PENDING) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, radius * 0.62, 0, Math.PI * 2);
+        ctx.fillStyle = rgba(NEUTRAL, 0.42);
+        ctx.fill();
+        return;
+      }
+
+      if (role === ROLE_BORDER) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+        ctx.fillStyle = theme.fade(theme.colors().plotHalo, 0.85);
+        ctx.fill();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        return;
+      }
+
       ctx.beginPath();
-      ctx.arc(sx, sy, index === this.hoverIndex ? POINT_RADIUS + 1.5 : POINT_RADIUS, 0, Math.PI * 2);
+      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
       ctx.fillStyle = color;
       ctx.fill();
       ctx.lineWidth = 1.4;
-      ctx.strokeStyle = 'rgba(11, 15, 24, 0.9)';
+      ctx.strokeStyle = theme.fade(theme.colors().plotHalo, 0.9);
       ctx.stroke();
     });
+  }
+
+  /** The eps radius around the point currently being expanded by DBSCAN. */
+  _drawEpsCircle(step) {
+    const { eps, active_index: active } = step.extras || {};
+    if (!eps || active === null || active === undefined) return;
+    if (this.overlays.eps === false) return;
+    const point = this.points[active];
+    if (!point) return;
+
+    const scale = this.width / (this.viewport.x_max - this.viewport.x_min);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = theme.fade(theme.colors().plotInk, 0.85);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(this.toScreenX(point.x), this.toScreenY(point.y), eps * scale, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** Dashed link between the two clusters that just merged. */
+  _drawMergeLink(step) {
+    const link = step.extras?.merge_link;
+    if (!link) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = 'rgba(255, 209, 102, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(this.toScreenX(link[0][0]), this.toScreenY(link[0][1]));
+    ctx.lineTo(this.toScreenX(link[1][0]), this.toScreenY(link[1][1]));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    link.forEach(([x, y]) => {
+      ctx.beginPath();
+      ctx.arc(this.toScreenX(x), this.toScreenY(y), 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 209, 102, 0.95)';
+      ctx.fill();
+    });
+    ctx.restore();
   }
 
   _drawCentroids(step) {
@@ -528,14 +631,14 @@ export class Plot {
       ctx.fillStyle = rgba(classColor(index), 0.95);
       ctx.fill();
       ctx.lineWidth = 2.2;
-      ctx.strokeStyle = '#0b0f18';
+      ctx.strokeStyle = theme.colors().plotHalo;
       ctx.stroke();
       ctx.beginPath();
       ctx.moveTo(-4, 0);
       ctx.lineTo(4, 0);
       ctx.moveTo(0, -4);
       ctx.lineTo(0, 4);
-      ctx.strokeStyle = '#0b0f18';
+      ctx.strokeStyle = theme.colors().plotHalo;
       ctx.lineWidth = 2;
       ctx.stroke();
       ctx.restore();

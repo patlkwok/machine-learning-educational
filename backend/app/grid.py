@@ -88,12 +88,24 @@ def encode_confidence(values: np.ndarray) -> str:
     return encode_bytes(np.round(values * 255.0))
 
 
+# Reserved class byte meaning "no cluster here": DBSCAN noise, or a region no
+# algorithm has claimed yet. The frontend paints it neutral grey rather than
+# pulling a colour from the class palette.
+NOISE_CLASS = 254
+
+
 def class_surface(
     labels: np.ndarray,
     n_classes: int,
     confidence: np.ndarray | None = None,
 ) -> dict:
-    """Build the JSON payload describing one decision-surface frame."""
+    """Build the JSON payload describing one decision-surface frame.
+
+    Labels of -1 are remapped to :data:`NOISE_CLASS`, so callers can pass
+    scikit-learn's usual "unclustered" marker straight through.
+    """
+    labels = np.asarray(labels)
+    labels = np.where(labels < 0, NOISE_CLASS, labels)
     surface = {
         "kind": "classes",
         "n_classes": int(n_classes),

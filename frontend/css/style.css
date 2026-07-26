@@ -1,4 +1,7 @@
 /* ---------------------------------------------------------------- tokens */
+/* Dark is the default; [data-theme="light"] below overrides it. Canvas and SVG
+   colours live here too, read at paint time via theme.js, so the plot follows
+   the theme without duplicating any palette in JavaScript. */
 :root {
   color-scheme: dark;
 
@@ -17,6 +20,26 @@
   --danger: #f2685c;
   --ok: #4dd6a8;
 
+  /* Canvas / SVG */
+  --plot-bg: #0b0f18;
+  --plot-grid: rgba(147, 161, 187, 0.11);
+  --plot-axis: rgba(147, 161, 187, 0.34);
+  --plot-label: rgba(147, 161, 187, 0.7);
+  --plot-ink: #e8edf7;          /* split lines, margins, eps circles */
+  --plot-halo: #0b0f18;         /* outline drawn around points */
+  --diagram-node-bg: rgba(22, 29, 44, 0.95);
+  --chart-marker-halo: #161d2c;
+
+  --glow-1: rgba(37, 48, 68, 0.55);
+  --glow-2: rgba(91, 156, 248, 0.10);
+  --topbar-bg: rgba(11, 15, 24, 0.7);
+  --overlay-bg: rgba(11, 15, 24, 0.9);
+  --chip-active-bg: rgba(255, 255, 255, 0.06);
+  --code-bg: rgba(91, 156, 248, 0.13);
+  --code-fg: #b9d3ff;
+  --error-fg: #ffd7d2;
+  --error-bg: rgba(60, 20, 18, 0.94);
+
   --c0: #4f9cf9;
   --c1: #f97362;
   --c2: #4dd6a8;
@@ -30,6 +53,46 @@
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f6fb;
+  --bg-raised: #ffffff;
+  --bg-sunken: #eef1f7;
+  --border: #cdd6e6;
+  --border-soft: #dde3ee;
+
+  --text: #161d2b;
+  --text-muted: #55617a;
+  --text-faint: #7b8699;
+
+  --accent: #2f6fd0;
+  --accent-strong: #1f57ad;
+  --danger: #cf3f33;
+  --ok: #1d9b73;
+
+  --plot-bg: #ffffff;
+  --plot-grid: rgba(60, 76, 105, 0.12);
+  --plot-axis: rgba(60, 76, 105, 0.38);
+  --plot-label: rgba(60, 76, 105, 0.72);
+  --plot-ink: #1d2738;
+  --plot-halo: #ffffff;
+  --diagram-node-bg: rgba(255, 255, 255, 0.96);
+  --chart-marker-halo: #ffffff;
+
+  --glow-1: rgba(47, 111, 208, 0.09);
+  --glow-2: rgba(47, 111, 208, 0.07);
+  --topbar-bg: rgba(255, 255, 255, 0.82);
+  --overlay-bg: rgba(255, 255, 255, 0.94);
+  --chip-active-bg: rgba(24, 38, 66, 0.06);
+  --code-bg: rgba(47, 111, 208, 0.12);
+  --code-fg: #1a4c92;
+  --error-fg: #8c2318;
+  --error-bg: rgba(253, 235, 233, 0.97);
+
+  --shadow: 0 8px 24px rgba(24, 38, 66, 0.12);
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -40,8 +103,8 @@ html, body {
 
 body {
   background:
-    radial-gradient(1100px 620px at 12% -10%, rgba(37, 48, 68, 0.55) 0%, transparent 60%),
-    radial-gradient(900px 520px at 90% 0%, rgba(91, 156, 248, 0.10) 0%, transparent 55%),
+    radial-gradient(1100px 620px at 12% -10%, var(--glow-1) 0%, transparent 60%),
+    radial-gradient(900px 520px at 90% 0%, var(--glow-2) 0%, transparent 55%),
     var(--bg);
   color: var(--text);
   font: 14px/1.55 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -53,8 +116,8 @@ p { margin: 0; }
 code {
   font-family: var(--mono);
   font-size: 0.92em;
-  background: rgba(91, 156, 248, 0.13);
-  color: #b9d3ff;
+  background: var(--code-bg);
+  color: var(--code-fg);
   padding: 0.1em 0.34em;
   border-radius: 4px;
 }
@@ -67,7 +130,7 @@ code {
   gap: 16px;
   padding: 14px 22px;
   border-bottom: 1px solid var(--border-soft);
-  background: rgba(11, 15, 24, 0.7);
+  background: var(--topbar-bg);
   backdrop-filter: blur(8px);
   position: sticky;
   top: 0;
@@ -97,6 +160,7 @@ code {
 }
 .pill-idle { }
 .pill-busy { color: #ffd98a; border-color: rgba(245, 196, 81, 0.45); background: rgba(245, 196, 81, 0.10); }
+.pill-stale { color: var(--accent-strong); border-color: var(--accent); background: rgba(91, 156, 248, 0.12); }
 .pill-ok { color: var(--ok); border-color: rgba(77, 214, 168, 0.4); background: rgba(77, 214, 168, 0.09); }
 .pill-error { color: var(--danger); border-color: rgba(242, 104, 92, 0.45); background: rgba(242, 104, 92, 0.10); }
 
@@ -321,7 +385,7 @@ input[type="range"] {
   border-radius: 50%;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
 }
-.class-chip.active { color: var(--text); border-color: currentColor; background: rgba(255, 255, 255, 0.06); }
+.class-chip.active { color: var(--text); border-color: currentColor; background: var(--chip-active-bg); }
 .class-chip.add-chip { color: var(--text-faint); }
 
 .toolbar-right { display: flex; align-items: center; gap: 12px; }
@@ -341,7 +405,7 @@ input[type="range"] {
   left: 50%;
   bottom: 18px;
   transform: translateX(-50%);
-  background: rgba(11, 15, 24, 0.9);
+  background: var(--overlay-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 8px 14px;
@@ -352,9 +416,9 @@ input[type="range"] {
   text-align: center;
 }
 .plot-overlay-error {
-  color: #ffd7d2;
+  color: var(--error-fg);
   border-color: rgba(242, 104, 92, 0.5);
-  background: rgba(60, 20, 18, 0.94);
+  background: var(--error-bg);
 }
 
 /* ------------------------------------------------------------ playback */

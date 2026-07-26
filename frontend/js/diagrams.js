@@ -2,6 +2,7 @@
 
 import { classColor } from './palette.js';
 import { escapeHtml } from './chart.js';
+import * as theme from './theme.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -78,7 +79,7 @@ export function renderTree(container, tree, classValues) {
                 ${child.x + NODE_WIDTH / 2} ${yOf(child.depth) - 22},
                 ${child.x + NODE_WIDTH / 2} ${yOf(child.depth)}`,
           fill: 'none',
-          stroke: 'rgba(147, 161, 187, 0.45)',
+          stroke: theme.fade(theme.colors().textMuted, 0.45),
           'stroke-width': 1.2,
         })
       );
@@ -87,7 +88,7 @@ export function renderTree(container, tree, classValues) {
         x: midX,
         y: yOf(box.depth) + NODE_HEIGHT + 14,
         'text-anchor': 'middle',
-        fill: 'rgba(147, 161, 187, 0.9)',
+        fill: theme.fade(theme.colors().textMuted, 0.9),
         'font-size': 9,
         'font-family': 'ui-monospace, monospace',
       });
@@ -102,7 +103,7 @@ export function renderTree(container, tree, classValues) {
     const isLeaf = node.is_leaf || box.truncated;
     const fill = isLeaf
       ? hexToRgba(classColor(node.predicted_index), 0.28)
-      : 'rgba(22, 29, 44, 0.95)';
+      : theme.colors().diagramNodeBg;
 
     svg.appendChild(
       el('rect', {
@@ -112,7 +113,7 @@ export function renderTree(container, tree, classValues) {
         height: NODE_HEIGHT,
         rx: 6,
         fill,
-        stroke: isLeaf ? classColor(node.predicted_index) : 'rgba(147, 161, 187, 0.4)',
+        stroke: isLeaf ? classColor(node.predicted_index) : theme.fade(theme.colors().textMuted, 0.4),
         'stroke-width': 1.2,
       })
     );
@@ -121,7 +122,7 @@ export function renderTree(container, tree, classValues) {
       x: box.x + NODE_WIDTH / 2,
       y: y + 16,
       'text-anchor': 'middle',
-      fill: '#e8edf7',
+      fill: theme.colors().text,
       'font-size': 10.5,
       'font-family': 'ui-monospace, monospace',
     });
@@ -134,7 +135,7 @@ export function renderTree(container, tree, classValues) {
       x: box.x + NODE_WIDTH / 2,
       y: y + 30,
       'text-anchor': 'middle',
-      fill: 'rgba(147, 161, 187, 0.95)',
+      fill: theme.fade(theme.colors().textMuted, 0.95),
       'font-size': 9.5,
       'font-family': 'ui-monospace, monospace',
     });
@@ -160,6 +161,130 @@ function hexToRgba(hex, alpha) {
   const g = parseInt(value.slice(2, 4), 16);
   const b = parseInt(value.slice(4, 6), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/* ----------------------------------------------------- dendrogram ----- */
+
+const LEAF_GAP = 19;
+const DENDRO_HEIGHT = 210;
+const DENDRO_PAD = { top: 12, bottom: 24, left: 34, right: 12 };
+
+/**
+ * Classic bracket dendrogram with a movable cut line.
+ *
+ * Links that merged below the cut are inside a cluster and drawn bright; links
+ * above it were severed by the cut and are drawn muted.
+ */
+export function renderDendrogram(container, tree, cutHeight, maxHeight) {
+  container.innerHTML = '';
+  if (!tree) return;
+
+  // Left-to-right leaf order fixes every x position; parents sit above the
+  // midpoint of their two children.
+  const xs = new Map();
+  let leaves = 0;
+  const place = (node) => {
+    if (node.kind !== 'node') {
+      const x = leaves;
+      leaves += 1;
+      xs.set(node, x);
+      return x;
+    }
+    const a = place(node.children[0]);
+    const b = place(node.children[1]);
+    const x = (a + b) / 2;
+    xs.set(node, x);
+    return x;
+  };
+  place(tree);
+
+  const top = maxHeight || tree.height || 1;
+  const width = DENDRO_PAD.left + leaves * LEAF_GAP + DENDRO_PAD.right;
+  const height = DENDRO_PAD.top + DENDRO_HEIGHT + DENDRO_PAD.bottom;
+  const xOf = (x) => DENDRO_PAD.left + x * LEAF_GAP + LEAF_GAP / 2;
+  const yOf = (h) => DENDRO_PAD.top + DENDRO_HEIGHT - (Math.min(h, top) / top) * DENDRO_HEIGHT;
+
+  const svg = el('svg', { width, height, viewBox: `0 0 ${width} ${height}` });
+
+  // Height axis.
+  [0, top / 2, top].forEach((h) => {
+    svg.appendChild(
+      el('line', {
+        x1: DENDRO_PAD.left - 4, y1: yOf(h), x2: width - DENDRO_PAD.right, y2: yOf(h),
+        stroke: theme.fade(theme.colors().textMuted, 0.12), 'stroke-width': 1,
+      })
+    );
+    const tick = el('text', {
+      x: DENDRO_PAD.left - 7, y: yOf(h) + 3, 'text-anchor': 'end',
+      fill: theme.fade(theme.colors().textMuted, 0.8), 'font-size': 9,
+      'font-family': 'ui-monospace, monospace',
+    });
+    tick.textContent = h >= 100 ? h.toFixed(0) : h.toFixed(h < 1 ? 2 : 1);
+    svg.appendChild(tick);
+  });
+
+  const draw = (node) => {
+    if (node.kind !== 'node') return;
+    const [left, right] = node.children;
+    const x1 = xOf(xs.get(left));
+    const x2 = xOf(xs.get(right));
+    const yTop = yOf(node.height);
+    const within = node.height < cutHeight;
+    const stroke = within ? theme.colors().accent : theme.fade(theme.colors().textMuted, 0.5);
+
+    svg.appendChild(
+      el('path', {
+        d: `M ${x1} ${yOf(left.height || 0)} L ${x1} ${yTop} L ${x2} ${yTop} L ${x2} ${yOf(right.height || 0)}`,
+        fill: 'none',
+        stroke,
+        'stroke-width': within ? 1.7 : 1.2,
+      })
+    );
+    draw(left);
+    draw(right);
+  };
+  draw(tree);
+
+  // Collapsed subtrees get a marker and their point count.
+  xs.forEach((x, node) => {
+    if (node.kind !== 'collapsed') return;
+    const cx = xOf(x);
+    const cy = yOf(node.height);
+    svg.appendChild(
+      el('path', {
+        d: `M ${cx} ${cy} L ${cx - 6} ${yOf(0)} L ${cx + 6} ${yOf(0)} Z`,
+        fill: theme.fade(theme.colors().textMuted, 0.28),
+        stroke: theme.fade(theme.colors().textMuted, 0.55),
+        'stroke-width': 1,
+      })
+    );
+    const label = el('text', {
+      x: cx, y: yOf(0) + 12, 'text-anchor': 'middle',
+      fill: theme.fade(theme.colors().textMuted, 0.9), 'font-size': 8.5,
+      'font-family': 'ui-monospace, monospace',
+    });
+    label.textContent = String(node.count);
+    svg.appendChild(label);
+  });
+
+  // The cut.
+  svg.appendChild(
+    el('line', {
+      x1: DENDRO_PAD.left - 4, y1: yOf(cutHeight), x2: width - DENDRO_PAD.right, y2: yOf(cutHeight),
+      stroke: '#ffd166', 'stroke-width': 1.6, 'stroke-dasharray': '6 4',
+    })
+  );
+
+  container.appendChild(svg);
+
+  const caption = document.createElement('p');
+  caption.className = 'field-help';
+  caption.style.marginTop = '8px';
+  caption.innerHTML =
+    'Height is the distance at which two groups merged. The dashed line is the current cut; ' +
+    'blue links merged below it, so they sit inside a cluster. Triangles are collapsed subtrees ' +
+    'labelled with their point count. Link colour is not matched to the plot colours.';
+  container.appendChild(caption);
 }
 
 /* -------------------------------------------------------- network ----- */
@@ -223,7 +348,7 @@ export function renderNetwork(container, network) {
               : layerIndex === positions.length - 1
                 ? '#f5c451'
                 : '#8ba0c0',
-          stroke: 'rgba(11, 15, 24, 0.9)',
+          stroke: theme.fade(theme.colors().plotHalo, 0.9),
           'stroke-width': 1.4,
         })
       );
@@ -232,7 +357,7 @@ export function renderNetwork(container, network) {
       x: column[0].x,
       y: height - 6,
       'text-anchor': 'middle',
-      fill: 'rgba(147, 161, 187, 0.9)',
+      fill: theme.fade(theme.colors().textMuted, 0.9),
       'font-size': 9.5,
       'font-family': 'ui-monospace, monospace',
     });

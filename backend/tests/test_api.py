@@ -58,7 +58,7 @@ def test_health():
 
 
 def test_catalogue_shape(catalogue):
-    assert len(catalogue["algorithms"]) == 10
+    assert len(catalogue["algorithms"]) == 12
     assert {spec["task"] for spec in catalogue["algorithms"]} == {
         "regression",
         "classification",
@@ -190,7 +190,16 @@ ALGORITHM_TASKS = {
     "random_forest": "classification",
     "mlp": "classification",
     "kmeans": "clustering",
+    "dbscan": "clustering",
+    "hierarchical": "clustering",
 }
+
+# Reserved surface byte for "no cluster here"; see NOISE_CLASS in grid.py.
+NOISE_CLASS = 254
+
+# CLASS_COLORS.length in frontend/js/palette.js. classColor() cycles that list,
+# so two clusters whose labels are congruent modulo this are drawn identically.
+PALETTE_SIZE = 12
 
 
 @pytest.mark.parametrize("algorithm,task", sorted(ALGORITHM_TASKS.items()))
@@ -215,7 +224,8 @@ def test_fit_returns_a_usable_animation(algorithm, task):
             assert surface, "classification/clustering steps must carry a decision surface"
             decoded = base64.b64decode(surface["classes"])
             assert len(decoded) == RESOLUTION**2
-            assert max(decoded) < max(surface["n_classes"], 1)
+            limit = max(surface["n_classes"], 1)
+            assert all(cell < limit or cell == NOISE_CLASS for cell in decoded)
             if surface["confidence"]:
                 assert len(base64.b64decode(surface["confidence"])) == RESOLUTION**2
 
@@ -250,6 +260,124 @@ def test_kmeans_inertia_never_increases():
     inertia = [step["metrics"]["inertia"] for step in payload["steps"]]
     assert all(b <= a + 1e-6 for a, b in zip(inertia, inertia[1:]))
     assert all(step["extras"]["centroids"] for step in payload["steps"])
+
+
+def _moons(n=200, noise=0.1):
+    return [
+        {**p, "label": None}
+        for p in datasets.generate("moons", n_samples=n, noise=noise, seed=2)
+    ]
+
+
+def test_dbscan_separates_the_moons_that_kmeans_cannot():
+    payload = fit("dbscan", _moons(), {"eps": 0.45, "min_samples": 5})
+    assert payload["summary"]["Clusters"] == 2
+    final = payload["steps"][-1]
+    assert final["metrics"]["unassigned"] == payload["summary"]["Noise points"]
+
+
+def test_dbscan_flood_fill_only_ever_claims_more_points():
+    payload = fit("dbscan", _moons(), {"eps": 0.45, "min_samples": 5})
+    claimed = [step["metrics"]["claimed"] for step in payload["steps"]]
+    assert claimed[0] == 0
+    assert all(b >= a for a, b in zip(claimed, claimed[1:]))
+    assert claimed[-1] == max(claimed)
+
+
+def test_dbscan_reports_point_roles_and_eps():
+    payload = fit("dbscan", _moons(), {"eps": 0.45, "min_samples": 5})
+    for step in payload["steps"]:
+        roles = step["extras"]["roles"]
+        assert len(roles) == 200
+        assert set(roles) <= {0, 1, 2, 3}
+        assert step["extras"]["eps"] == pytest.approx(0.45)
+    # Only the finished frame may declare a point to be noise.
+    assert 3 not in set(payload["steps"][0]["extras"]["roles"])
+
+
+def test_dbscan_tiny_eps_makes_everything_noise():
+    payload = fit("dbscan", _moons(), {"eps": 0.02, "min_samples": 5})
+    assert payload["summary"]["Clusters"] == 0
+    assert payload["summary"]["Noise points"] == 200
+    assert any("noise" in note.lower() for note in payload["notes"])
+    # Every grid cell must fall back to the reserved noise byte.
+    cells = set(base64.b64decode(payload["steps"][-1]["surface"]["classes"]))
+    assert cells == {NOISE_CLASS}
+
+
+def test_dbscan_surface_is_flagged_as_extrapolated():
+    payload = fit("dbscan", _moons())
+    assert any("extrapolation" in note for note in payload["notes"])
+
+
+def test_hierarchical_merges_down_to_the_requested_cut():
+    payload = fit("hierarchical", points_for("clustering"), {"n_clusters": 4})
+    counts = [step["metrics"]["clusters"] for step in payload["steps"]]
+    assert counts[-1] == 4
+    assert counts[0] > counts[-1]
+    assert all(b <= a for a, b in zip(counts, counts[1:])), "cluster count must only fall"
+
+
+def test_hierarchical_merge_distance_only_grows():
+    payload = fit("hierarchical", points_for("clustering"), {"n_clusters": 2})
+    heights = [step["metrics"]["merge_distance"] for step in payload["steps"]]
+    assert all(b >= a - 1e-9 for a, b in zip(heights, heights[1:]))
+
+
+@pytest.mark.parametrize("method", ["ward", "average", "complete", "single"])
+@pytest.mark.parametrize("k", [2, 3, 4, 6, 10])
+def test_hierarchical_clusters_never_share_a_colour(method, k):
+    """Distinct clusters must land on distinct palette slots.
+
+    Colour stability keeps label values fixed as clusters merge, so labels are
+    not contiguous. If any two exceed the palette length apart, they cycle onto
+    the same colour and the plot appears to show fewer clusters than it found.
+    """
+    payload = fit("hierarchical", points_for("clustering"), {"linkage": method, "n_clusters": k})
+    for step in payload["steps"]:
+        labels = set(step["extras"]["assignments"])
+        slots = {label % PALETTE_SIZE for label in labels}
+        assert len(slots) == len(labels), (
+            f"{method} at {step['label']}: labels {sorted(labels)} collapse to "
+            f"{len(slots)} colours"
+        )
+    assert payload["steps"][-1]["metrics"]["clusters"] == k
+
+
+def test_kmeans_clusters_never_share_a_colour():
+    payload = fit("kmeans", points_for("clustering"), {"k": 10})
+    for step in payload["steps"]:
+        labels = set(step["extras"]["assignments"])
+        assert len({label % PALETTE_SIZE for label in labels}) == len(labels)
+
+
+def test_hierarchical_emits_a_dendrogram():
+    payload = fit("hierarchical", points_for("clustering"), {"n_clusters": 3})
+    tree = payload["extras"]["dendrogram"]
+    assert tree["kind"] == "node"
+    assert payload["extras"]["max_height"] > 0
+
+    def leaves(node):
+        return 1 if node["kind"] != "node" else sum(leaves(c) for c in node["children"])
+
+    # Truncated for legibility rather than one leaf per point.
+    assert 2 <= leaves(tree) <= 40
+    assert all(step["extras"]["cut_height"] >= 0 for step in payload["steps"])
+
+
+@pytest.mark.parametrize("method", ["ward", "average", "complete", "single"])
+def test_every_linkage_runs(method):
+    payload = fit("hierarchical", points_for("clustering"), {"linkage": method, "n_clusters": 3})
+    assert payload["summary"]["Linkage"] == method
+    assert payload["steps"][-1]["metrics"]["clusters"] == 3
+
+
+def test_single_linkage_differs_from_ward():
+    """Linkage is the parameter that actually changes the answer."""
+    points = _moons(noise=0.06)
+    ward = fit("hierarchical", points, {"linkage": "ward", "n_clusters": 2})
+    single = fit("hierarchical", points, {"linkage": "single", "n_clusters": 2})
+    assert ward["steps"][-1]["extras"]["assignments"] != single["steps"][-1]["extras"]["assignments"]
 
 
 def test_knn_k1_memorises_the_training_set():
